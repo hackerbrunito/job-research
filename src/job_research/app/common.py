@@ -369,6 +369,167 @@ def latest_run_status(
     }
 
 
+# ---- triage label CRUD --------------------------------------------------- #
+
+
+def _norm_title(title: str | None) -> str:
+    """Lowercase + strip for label lookup key."""
+    return (title or "").strip().lower()
+
+
+def list_title_labels(
+    con: duckdb.DuckDBPyConnection, profile_id: str
+) -> list[dict[str, Any]]:
+    """Return all labels for a profile, ordered by count_seen desc."""
+    rows = con.execute(
+        """
+        SELECT title_norm, label, note, count_seen, updated_at
+        FROM profile_title_labels
+        WHERE profile_id = ?
+        ORDER BY count_seen DESC, title_norm
+        """,
+        [profile_id],
+    ).fetchall()
+    return [
+        {
+            "title_norm": r[0],
+            "label": r[1],
+            "note": r[2],
+            "count_seen": r[3],
+            "updated_at": r[4],
+        }
+        for r in rows
+    ]
+
+
+def save_title_label(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    profile_id: str,
+    title_norm: str,
+    label: str,  # 'accept' | 'reject' | 'unsure'
+    note: str | None = None,
+    count_seen: int = 1,
+) -> None:
+    """Upsert a single label. Increments count_seen on conflict."""
+    if label not in {"accept", "reject", "unsure"}:
+        raise ValueError(f"label must be accept/reject/unsure, got {label!r}")
+    con.execute(
+        """
+        INSERT INTO profile_title_labels
+            (profile_id, title_norm, label, note, count_seen, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, now(), now())
+        ON CONFLICT (profile_id, title_norm) DO UPDATE SET
+            label      = excluded.label,
+            note       = excluded.note,
+            count_seen = profile_title_labels.count_seen + 1,
+            updated_at = now()
+        """,
+        [profile_id, title_norm, label, note, count_seen],
+    )
+
+
+def delete_title_label(
+    con: duckdb.DuckDBPyConnection, *, profile_id: str, title_norm: str
+) -> None:
+    con.execute(
+        "DELETE FROM profile_title_labels WHERE profile_id = ? AND title_norm = ?",
+        [profile_id, title_norm],
+    )
+
+
+def apply_title_labels_to_judged(
+    con: duckdb.DuckDBPyConnection, profile_id: str
+) -> int:
+    """Update judged_job_offers.ensemble_verdict for rows whose title matches
+    a user-confirmed label for this profile.
+
+    Returns the number of rows updated.
+    """
+    # Accept labels → override to 'accept' (even if rule said review)
+    con.execute(
+        """
+        UPDATE judged_job_offers
+        SET ensemble_verdict = 'accept',
+            judged_at        = CURRENT_TIMESTAMP
+        WHERE profile_id = ?
+          AND lower(trim(job_title)) IN (
+              SELECT title_norm FROM profile_title_labels
+              WHERE profile_id = ? AND label = 'accept'
+          )
+          AND ensemble_verdict != 'accept'
+        """,
+        [profile_id, profile_id],
+    )
+    # Reject labels → override to 'reject'
+    con.execute(
+        """
+        UPDATE judged_job_offers
+        SET ensemble_verdict = 'reject',
+            judged_at        = CURRENT_TIMESTAMP
+        WHERE profile_id = ?
+          AND lower(trim(job_title)) IN (
+              SELECT title_norm FROM profile_title_labels
+              WHERE profile_id = ? AND label = 'reject'
+          )
+          AND ensemble_verdict != 'reject'
+        """,
+        [profile_id, profile_id],
+    )
+    # Return total rows now with a user-label-driven verdict.
+    result = con.execute(
+        """
+        SELECT COUNT(*) FROM judged_job_offers j
+        JOIN profile_title_labels l
+          ON j.profile_id = l.profile_id
+         AND lower(trim(j.job_title)) = l.title_norm
+        WHERE j.profile_id = ?
+        """,
+        [profile_id],
+    ).fetchone()
+    return int(result[0]) if result else 0
+
+
+def get_triage_candidates(
+    con: duckdb.DuckDBPyConnection,
+    profile_id: str,
+    *,
+    include_decided: bool = False,
+) -> pd.DataFrame:
+    """Return unique job titles from staging for this profile, with verdict info.
+
+    Columns: title_norm, display_title, company_sample, count,
+             rule_verdict, ensemble_verdict, user_label.
+
+    include_decided=False (default) shows only rows where user hasn't
+    labelled yet (unlabelled or unsure). True shows all.
+    """
+    label_filter = (
+        "" if include_decided else "AND (l.label IS NULL OR l.label = 'unsure')"
+    )
+    sql = f"""
+        SELECT
+            lower(trim(j.job_title))                             AS title_norm,
+            j.job_title                                          AS display_title,
+            any_value(s.company)                                 AS company_sample,
+            COUNT(*)                                             AS count,
+            any_value(j.rule_verdict)                            AS rule_verdict,
+            any_value(j.ensemble_verdict)                        AS ensemble_verdict,
+            any_value(l.label)                                   AS user_label
+        FROM judged_job_offers j
+        JOIN staging_job_offers s ON s.id = j.job_id
+        LEFT JOIN profile_title_labels l
+               ON l.profile_id = j.profile_id
+              AND l.title_norm  = lower(trim(j.job_title))
+        WHERE j.profile_id = ?
+        {label_filter}
+        GROUP BY lower(trim(j.job_title)), j.job_title
+        ORDER BY count DESC, title_norm
+        LIMIT 200
+    """
+    return con.execute(sql, [profile_id]).df()
+
+
 # --------------------------------------------------------------------------- #
 # Connection helper
 # --------------------------------------------------------------------------- #

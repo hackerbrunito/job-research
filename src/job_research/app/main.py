@@ -165,6 +165,11 @@ def main() -> None:
                 title="Run history",
                 url_path="history",
             ),
+            st.Page(
+                str(_PAGES_DIR / "6_triage.py"),
+                title="Triage",
+                url_path="triage",
+            ),
         ],
     }
 
@@ -181,6 +186,7 @@ def main() -> None:
                     _PAGES_DIR / "3_llm.py",
                     _PAGES_DIR / "4_run.py",
                     _PAGES_DIR / "5_history.py",
+                    _PAGES_DIR / "6_triage.py",
                 ][: len(section_pages)],
                 strict=False,
             )

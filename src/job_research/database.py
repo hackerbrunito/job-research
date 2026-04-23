@@ -110,6 +110,7 @@ _INSERTABLE_TABLES: frozenset[str] = frozenset(
         "job_skill_bridge",
         "user_search_config",
         "user_search_profiles",
+        "profile_title_labels",
     }
 )
 

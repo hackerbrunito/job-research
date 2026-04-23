@@ -15,14 +15,19 @@ import pytest
 from job_research import constants as C
 from job_research.app.common import (
     Profile,
+    apply_title_labels_to_judged,
     create_profile_from_name,
     delete_profile,
+    delete_title_label,
     ensure_default_profile,
     get_profile,
+    get_triage_candidates,
     list_profiles,
+    list_title_labels,
     load_fact_with_dims,
     load_mart,
     save_profile,
+    save_title_label,
     slugify,
 )
 from job_research.database import stable_key
@@ -365,3 +370,165 @@ def test_load_fact_with_dims_invalid_limit(
 ) -> None:
     with pytest.raises(ValueError):
         load_fact_with_dims(tmp_duckdb, limit=0)
+
+
+# --------------------------------------------------------------------------- #
+# Triage label CRUD
+# --------------------------------------------------------------------------- #
+def test_save_and_list_title_labels(tmp_duckdb: duckdb.DuckDBPyConnection) -> None:
+    save_title_label(
+        tmp_duckdb,
+        profile_id="p1",
+        title_norm="data engineer",
+        label="accept",
+        note="good fit",
+    )
+    save_title_label(
+        tmp_duckdb,
+        profile_id="p1",
+        title_norm="marketing manager",
+        label="reject",
+        note=None,
+    )
+    labels = list_title_labels(tmp_duckdb, "p1")
+    assert len(labels) == 2
+    by_norm = {r["title_norm"]: r for r in labels}
+    assert by_norm["data engineer"]["label"] == "accept"
+    assert by_norm["data engineer"]["note"] == "good fit"
+    assert by_norm["marketing manager"]["label"] == "reject"
+    assert by_norm["marketing manager"]["note"] is None
+    # Other profile is isolated
+    assert list_title_labels(tmp_duckdb, "p2") == []
+
+
+def test_save_title_label_upsert_updates_label(
+    tmp_duckdb: duckdb.DuckDBPyConnection,
+) -> None:
+    save_title_label(
+        tmp_duckdb, profile_id="p1", title_norm="store manager", label="accept"
+    )
+    save_title_label(
+        tmp_duckdb,
+        profile_id="p1",
+        title_norm="store manager",
+        label="reject",
+        note="changed mind",
+    )
+    labels = list_title_labels(tmp_duckdb, "p1")
+    assert len(labels) == 1
+    assert labels[0]["label"] == "reject"
+    assert labels[0]["note"] == "changed mind"
+    # count_seen incremented on conflict
+    assert labels[0]["count_seen"] == 2
+
+
+def test_save_title_label_rejects_invalid_label(
+    tmp_duckdb: duckdb.DuckDBPyConnection,
+) -> None:
+    with pytest.raises(ValueError, match="accept/reject/unsure"):
+        save_title_label(tmp_duckdb, profile_id="p1", title_norm="foo", label="maybe")
+
+
+def test_delete_title_label(tmp_duckdb: duckdb.DuckDBPyConnection) -> None:
+    save_title_label(
+        tmp_duckdb, profile_id="p1", title_norm="data engineer", label="accept"
+    )
+    assert len(list_title_labels(tmp_duckdb, "p1")) == 1
+    delete_title_label(tmp_duckdb, profile_id="p1", title_norm="data engineer")
+    assert list_title_labels(tmp_duckdb, "p1") == []
+
+
+def test_apply_labels_overrides_judged_verdict(
+    tmp_duckdb: duckdb.DuckDBPyConnection,
+) -> None:
+    now = datetime.now(UTC).replace(tzinfo=None)
+    job_url = "https://example.com/j/triage1"
+    jid = stable_key("linkedin", job_url)
+
+    # Insert minimal staging row
+    tmp_duckdb.execute(
+        """
+        INSERT INTO staging_job_offers
+            (id, scraped_at, run_id, profile_id, site, search_keyword, job_url)
+        VALUES (?, ?, 'r1', 'p1', 'linkedin', 'Data Engineer', ?)
+        """,
+        [jid, now, job_url],
+    )
+    # Insert judged row with ensemble_verdict = 'review'
+    tmp_duckdb.execute(
+        """
+        INSERT INTO judged_job_offers
+            (job_id, profile_id, search_keyword, job_title,
+             rule_verdict, ensemble_verdict)
+        VALUES (?, 'p1', 'Data Engineer', 'Marketing Manager',
+                'reject', 'review')
+        """,
+        [jid],
+    )
+
+    # Save a 'reject' label for the title
+    save_title_label(
+        tmp_duckdb,
+        profile_id="p1",
+        title_norm="marketing manager",
+        label="reject",
+    )
+
+    count = apply_title_labels_to_judged(tmp_duckdb, "p1")
+    assert count >= 1
+
+    row = tmp_duckdb.execute(
+        "SELECT ensemble_verdict FROM judged_job_offers WHERE job_id = ?", [jid]
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "reject"
+
+
+def test_get_triage_candidates_returns_unlabelled(
+    tmp_duckdb: duckdb.DuckDBPyConnection,
+) -> None:
+    now = datetime.now(UTC).replace(tzinfo=None)
+
+    def _seed(url: str, title: str) -> str:
+        jid = stable_key("linkedin", url)
+        tmp_duckdb.execute(
+            """
+            INSERT INTO staging_job_offers
+                (id, scraped_at, run_id, profile_id, site, search_keyword,
+                 job_url, company)
+            VALUES (?, ?, 'r1', 'p1', 'linkedin', 'Data Engineer', ?, 'Acme')
+            """,
+            [jid, now, url],
+        )
+        tmp_duckdb.execute(
+            """
+            INSERT INTO judged_job_offers
+                (job_id, profile_id, search_keyword, job_title,
+                 rule_verdict, ensemble_verdict)
+            VALUES (?, 'p1', 'Data Engineer', ?, 'review', 'review')
+            """,
+            [jid, title],
+        )
+        return jid
+
+    _seed("https://example.com/j/a", "Data Engineer")
+    _seed("https://example.com/j/b", "Marketing Manager")
+
+    # Both titles appear in the default (unlabelled) view
+    df = get_triage_candidates(tmp_duckdb, "p1")
+    assert len(df) == 2
+    assert set(df["title_norm"]) == {"data engineer", "marketing manager"}
+
+    # Label one title
+    save_title_label(
+        tmp_duckdb, profile_id="p1", title_norm="data engineer", label="accept"
+    )
+
+    # Default view (include_decided=False) hides the labelled title
+    df2 = get_triage_candidates(tmp_duckdb, "p1")
+    assert len(df2) == 1
+    assert df2.iloc[0]["title_norm"] == "marketing manager"
+
+    # include_decided=True shows all
+    df3 = get_triage_candidates(tmp_duckdb, "p1", include_decided=True)
+    assert len(df3) == 2

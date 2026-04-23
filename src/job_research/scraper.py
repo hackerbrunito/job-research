@@ -66,7 +66,12 @@ def _tokenize(text: str) -> set[str]:
     return {t for t in tokens if t and t not in _STOPWORDS}
 
 
-def _rule_title_filter(title: str | None, keyword: str) -> tuple[str, str]:
+def _rule_title_filter(
+    title: str | None,
+    keyword: str,
+    *,
+    blocked_norms: frozenset[str] | set[str] = frozenset(),
+) -> tuple[str, str]:
     """Return (verdict, reason) based on title/keyword word overlap.
 
     Jaccard score = |shared words| / |union of words| (stopwords excluded).
@@ -74,7 +79,14 @@ def _rule_title_filter(title: str | None, keyword: str) -> tuple[str, str]:
         >= 0.5  → 'accept'
         >= 0.15 → 'review'
         else    → 'reject'
+
+    User-blocked titles are checked first and always return 'reject'.
     """
+    # Check user blocklist first — highest priority.
+    title_norm = (title or "").strip().lower()
+    if title_norm and title_norm in blocked_norms:
+        return "reject", "user_blocked"
+
     if not title:
         return "review", "title_overlap=0.00"
 
@@ -379,6 +391,21 @@ def _run(
     cfg = get_settings().scraping
     results: list[ScrapeResult] = []
 
+    # Load user-confirmed 'reject' labels so the rule filter can pre-block them.
+    blocked_norms: set[str] = set()
+    if profile_id:
+        try:
+            rows = con.execute(
+                """
+                SELECT title_norm FROM profile_title_labels
+                WHERE profile_id = ? AND label = 'reject'
+                """,
+                [profile_id],
+            ).fetchall()
+            blocked_norms = {r[0] for r in rows}
+        except Exception:
+            log.debug("triage_labels.load_skipped", profile_id=profile_id)
+
     for req in requests:
         log.info(
             "scrape.request.start",
@@ -437,7 +464,9 @@ def _run(
             if inserted > 0:
                 verdict_records: list[dict[str, Any]] = []
                 for _, srow in staging_df.iterrows():
-                    rv, rr = _rule_title_filter(srow.get("title"), req.keyword)
+                    rv, rr = _rule_title_filter(
+                        srow.get("title"), req.keyword, blocked_norms=blocked_norms
+                    )
                     verdict_records.append(
                         {
                             "job_id": srow["id"],
