@@ -32,6 +32,9 @@ dependencies = [
     "pyarrow>=17.0",
     # Country code helpers
     "pycountry>=24.6",
+    # Semantic similarity (bi-encoder)
+    "sentence-transformers>=3.0,<4.0",
+    "torch>=2.0",
 ]
 
 [dependency-groups]

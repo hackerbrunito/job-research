@@ -97,3 +97,10 @@ FLOW_RETRY_DELAY_SECONDS: Final[int] = 30
 # ---- Dashboard -----------------------------------------------------------
 DEFAULT_DASHBOARD_HOST: Final[str] = "localhost"
 DEFAULT_DASHBOARD_PORT: Final[int] = 8501
+
+# ---- Semantic scorer (bi-encoder) ----------------------------------------
+# Minimum cosine-similarity score to pass a row through to the LLM.
+# Rows that score below this are pre-rejected without an LLM call.
+# Calibrated for short-text job-title queries (e.g. "Store Development Manager").
+# Adjust after empirical tuning against a labelled set.
+SEMANTIC_SCORE_THRESHOLD: Final[float] = 0.35

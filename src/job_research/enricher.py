@@ -25,6 +25,21 @@ from job_research.llm_providers import LLMProvider, build_provider
 from job_research.logging_setup import get_logger
 from job_research.schemas import JobEnrichment
 
+# Graceful degradation: if sentence-transformers isn't installed, every row
+# gets score=1.0 and passes through to the LLM exactly as before.
+try:
+    from job_research.semantic_scorer import score_relevance as _score_relevance
+
+    _SEMANTIC_SCORER_AVAILABLE = True
+    _SEMANTIC_SCORE_THRESHOLD = C.SEMANTIC_SCORE_THRESHOLD
+except ImportError:
+    _SEMANTIC_SCORER_AVAILABLE = False
+
+    def _score_relevance(**_: object) -> float:  # type: ignore[misc]
+        return 1.0
+
+    _SEMANTIC_SCORE_THRESHOLD = 0.0
+
 log = get_logger(__name__)
 
 
@@ -101,9 +116,16 @@ ORDER BY s.scraped_at
 """
 
 
-def _compute_ensemble(rule_verdict: str | None, llm_is_relevant: bool) -> str:
-    """Derive ensemble_verdict from rule filter + LLM signal."""
+def _compute_ensemble(
+    rule_verdict: str | None,
+    llm_is_relevant: bool,
+    biencoder_score: float = 1.0,
+) -> str:
+    """Derive ensemble_verdict from rule filter, bi-encoder score, and LLM signal."""
     if rule_verdict == "reject":
+        return "reject"
+    # Bi-encoder pre-reject: score too low even before consulting the LLM.
+    if biencoder_score < _SEMANTIC_SCORE_THRESHOLD:
         return "reject"
     if llm_is_relevant:
         return "accept"
@@ -167,6 +189,47 @@ def enrich_staging(
         for row in pending:
             job_id, title, description, search_keyword, profile_id, rule_verdict = row
             attempted += 1
+
+            # --- Bi-encoder pre-filter (runs before LLM to save tokens) ------
+            biencoder_score: float = _score_relevance(
+                search_keyword=search_keyword or "",
+                job_title=title or "",
+                job_description=description,
+            )
+
+            if biencoder_score < _SEMANTIC_SCORE_THRESHOLD:
+                log.info(
+                    "enrich.biencoder_reject",
+                    job_id=job_id,
+                    score=biencoder_score,
+                    threshold=_SEMANTIC_SCORE_THRESHOLD,
+                )
+                conn.execute(
+                    """
+                    INSERT INTO judged_job_offers
+                        (job_id, profile_id, search_keyword, job_title,
+                         rule_verdict, ensemble_verdict, biencoder_score,
+                         judged_at)
+                    VALUES (?, ?, ?, ?, ?, 'reject', ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT (job_id) DO UPDATE SET
+                        biencoder_score  = excluded.biencoder_score,
+                        ensemble_verdict = excluded.ensemble_verdict,
+                        judged_at        = excluded.judged_at
+                    """,
+                    [
+                        job_id,
+                        profile_id,
+                        search_keyword,
+                        title,
+                        rule_verdict or "accept",
+                        biencoder_score,
+                    ],
+                )
+                # Count as succeeded (scored and written); no LLM call needed.
+                succeeded += 1
+                continue
+            # ------------------------------------------------------------------
+
             try:
                 enrichment = provider.enrich(
                     title=title or "",
@@ -201,19 +264,23 @@ def enrich_staging(
             )
 
             # Write LLM verdict to judged_job_offers (upsert).
-            ensemble = _compute_ensemble(rule_verdict, enrichment.is_relevant)
+            ensemble = _compute_ensemble(
+                rule_verdict, enrichment.is_relevant, biencoder_score
+            )
             conn.execute(
                 """
                 INSERT INTO judged_job_offers
                     (job_id, profile_id, search_keyword, job_title,
                      rule_verdict, llm_is_relevant, llm_confidence,
-                     llm_reason, ensemble_verdict, judged_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                     llm_reason, ensemble_verdict, biencoder_score,
+                     judged_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT (job_id) DO UPDATE SET
                     llm_is_relevant  = excluded.llm_is_relevant,
                     llm_confidence   = excluded.llm_confidence,
                     llm_reason       = excluded.llm_reason,
                     ensemble_verdict = excluded.ensemble_verdict,
+                    biencoder_score  = excluded.biencoder_score,
                     judged_at        = excluded.judged_at
                 """,
                 [
@@ -226,6 +293,7 @@ def enrich_staging(
                     enrichment.relevance_confidence,
                     enrichment.relevance_reason,
                     ensemble,
+                    biencoder_score,
                 ],
             )
             succeeded += 1

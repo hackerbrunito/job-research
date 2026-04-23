@@ -21,6 +21,23 @@ from job_research.schemas import (
 
 
 # --------------------------------------------------------------------------- #
+# Patch the bi-encoder scorer for all enricher tests.
+#
+# `test_enricher.py` tests enrichment *logic* (LLM routing, verdict writing,
+# idempotency), not semantic similarity.  Real embeddings would make these
+# tests slow, order-dependent, and fragile (job titles like "Python Dev" score
+# <0.35 against the keyword "python", causing unexpected pre-rejects).
+#
+# Semantic scorer quality is validated independently in test_semantic_scorer.py.
+# --------------------------------------------------------------------------- #
+@pytest.fixture(autouse=True)
+def _bypass_scorer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the bi-encoder a no-op (score=1.0) for all tests in this module."""
+    monkeypatch.setattr("job_research.enricher._score_relevance", lambda **_: 1.0)
+    monkeypatch.setattr("job_research.enricher._SEMANTIC_SCORE_THRESHOLD", 0.0)
+
+
+# --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
 class _FakeProvider:

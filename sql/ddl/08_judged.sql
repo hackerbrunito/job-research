@@ -33,3 +33,6 @@ ALTER TABLE judged_job_offers ADD COLUMN IF NOT EXISTS llm_confidence    DOUBLE;
 ALTER TABLE judged_job_offers ADD COLUMN IF NOT EXISTS llm_reason        VARCHAR;
 ALTER TABLE judged_job_offers ADD COLUMN IF NOT EXISTS ensemble_verdict  VARCHAR;
 ALTER TABLE judged_job_offers ADD COLUMN IF NOT EXISTS judged_at         TIMESTAMP;
+
+-- Idempotent migration: add bi-encoder score column.
+ALTER TABLE judged_job_offers ADD COLUMN IF NOT EXISTS biencoder_score DOUBLE;
