@@ -55,6 +55,18 @@ WORK_MODES: Final[frozenset[str]] = frozenset(
 # ---- Skill types ---------------------------------------------------------
 SKILL_TYPE_TECH: Final[str] = "tech"
 SKILL_TYPE_SOFT: Final[str] = "soft"
+# `domain` covers everything a job posting lists under "skills" /
+# "qualifications" that is neither a technology nor an interpersonal
+# adjective. Examples: "visual merchandising", "SAP Retail", "supplier
+# negotiation", "P&L ownership", "agile delivery", "technical leadership".
+SKILL_TYPE_DOMAIN: Final[str] = "domain"
+SKILL_TYPES: Final[frozenset[str]] = frozenset(
+    {SKILL_TYPE_TECH, SKILL_TYPE_SOFT, SKILL_TYPE_DOMAIN}
+)
+
+# ---- Search profiles -----------------------------------------------------
+DEFAULT_PROFILE_ID: Final[str] = "default"
+DEFAULT_PROFILE_NAME: Final[str] = "Default"
 
 # ---- Salary periods ------------------------------------------------------
 SALARY_PERIOD_YEARLY: Final[str] = "yearly"

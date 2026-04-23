@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS int_enriched_job_info (
     llm_model       VARCHAR NOT NULL,
     tech_skills     JSON NOT NULL,      -- array of lowercase strings
     soft_skills     JSON NOT NULL,      -- array of lowercase adjective-form strings
+    domain_skills   JSON,               -- domain / methodology / practice phrases; [] when empty
     city            VARCHAR,
     country         VARCHAR,
     country_code    VARCHAR,            -- ISO 3166-1 alpha-2
@@ -22,3 +23,9 @@ CREATE TABLE IF NOT EXISTS int_enriched_job_info (
 
 CREATE INDEX IF NOT EXISTS idx_int_enriched_country ON int_enriched_job_info(country_code);
 CREATE INDEX IF NOT EXISTS idx_int_enriched_mode    ON int_enriched_job_info(work_mode);
+
+-- Idempotent migration for databases created before domain_skills existed.
+-- DuckDB doesn't support constraints in ALTER ADD COLUMN, so the column is
+-- nullable. The enricher always writes a list, so new rows are never NULL;
+-- legacy rows get NULL and _parse_skills() treats that as an empty list.
+ALTER TABLE int_enriched_job_info ADD COLUMN IF NOT EXISTS domain_skills JSON;

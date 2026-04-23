@@ -20,7 +20,11 @@ from typing import Any
 import duckdb
 import pandas as pd
 
-from job_research.constants import SKILL_TYPE_SOFT, SKILL_TYPE_TECH
+from job_research.constants import (
+    SKILL_TYPE_DOMAIN,
+    SKILL_TYPE_SOFT,
+    SKILL_TYPE_TECH,
+)
 from job_research.database import connect, load_sql, stable_key
 from job_research.logging_setup import get_logger
 
@@ -122,6 +126,7 @@ def _load_enriched(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
             i.enriched_at,
             i.tech_skills,
             i.soft_skills,
+            i.domain_skills,
             i.city,
             i.country,
             i.country_code,
@@ -227,6 +232,7 @@ def _build_dim_skill_and_bridge(
         for skill_type, col in (
             (SKILL_TYPE_TECH, "tech_skills"),
             (SKILL_TYPE_SOFT, "soft_skills"),
+            (SKILL_TYPE_DOMAIN, "domain_skills"),
         ):
             for name in _parse_skills(r[col]):
                 n_norm = name.strip().lower()

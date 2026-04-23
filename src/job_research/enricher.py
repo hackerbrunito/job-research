@@ -59,6 +59,7 @@ def _enrichment_to_row(
         "llm_model": model_name,
         "tech_skills": enrichment.tech_skills,
         "soft_skills": enrichment.soft_skills,
+        "domain_skills": enrichment.domain_skills,
         "city": enrichment.location.city,
         "country": enrichment.location.country,
         "country_code": enrichment.location.country_code,

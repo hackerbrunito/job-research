@@ -118,15 +118,35 @@ class JobEnrichment(BaseModel):
     tech_skills: list[str] = Field(
         default_factory=list,
         description=(
-            "Technical skills: tools, languages, frameworks, platforms. "
-            "Lowercase, deduplicated."
+            "Technology skills ONLY: concrete tools, programming languages, "
+            "frameworks, libraries, platforms, cloud services, databases, "
+            "protocols. Examples: python, spark, aws, kubernetes, postgres, "
+            "react. Lowercase, deduplicated. Do NOT put methodologies, "
+            "soft skills, or domain practices here."
         ),
     )
     soft_skills: list[str] = Field(
         default_factory=list,
         description=(
-            "Soft skills as lowercase adjectives (e.g. 'collaborative', "
-            "'analytical'). Deduplicated."
+            "Interpersonal / character traits as lowercase adjectives. "
+            "Examples: collaborative, analytical, proactive, resilient, "
+            "detail-oriented. Deduplicated. NOT job functions or tools."
+        ),
+    )
+    domain_skills: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Every other skill or qualification the posting explicitly "
+            "lists that does NOT fit tech_skills (a technology/tool) or "
+            "soft_skills (an interpersonal adjective). This includes "
+            "domain expertise, business practices, methodologies, "
+            "responsibilities, certifications, and industry-specific "
+            "know-how. Examples: visual merchandising, sap retail, "
+            "supplier negotiation, p&l ownership, agile delivery, "
+            "stakeholder management, technical leadership, store layout "
+            "design, budget management, threat modelling, penetration "
+            "testing, mlops, project management, gdpr compliance. "
+            "Lowercase, deduplicated, short phrases preferred."
         ),
     )
     location: LocationExtraction = Field(default_factory=LocationExtraction)
@@ -148,7 +168,7 @@ class JobEnrichment(BaseModel):
             return {}
         return v
 
-    @field_validator("tech_skills", "soft_skills", mode="before")
+    @field_validator("tech_skills", "soft_skills", "domain_skills", mode="before")
     @classmethod
     def _clean_skills(cls, v: object) -> list[str]:
         if v is None:
