@@ -16,7 +16,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -144,7 +144,7 @@ def record_run_start(
         INSERT INTO pipeline_runs (run_id, started_at, status, keywords, locations, sites)
         VALUES (?, ?, 'running', ?, ?, ?)
         """,
-        [run_id, datetime.utcnow(), keywords, locations, sites],
+        [run_id, datetime.now(UTC).replace(tzinfo=None), keywords, locations, sites],
     )
 
 
@@ -168,7 +168,7 @@ def record_run_finish(
         WHERE run_id = ?
         """,
         [
-            datetime.utcnow(),
+            datetime.now(UTC).replace(tzinfo=None),
             status,
             scraped_count,
             enriched_count,
