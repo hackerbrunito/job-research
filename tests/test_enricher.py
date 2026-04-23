@@ -115,29 +115,30 @@ class TestSchemaValidators:
         loc = LocationExtraction(country_code="gb")
         assert loc.country_code == "GB"
 
-    def test_country_code_rejects_non_alpha2(self) -> None:
-        with pytest.raises(ValidationError):
-            LocationExtraction(country_code="USA")
+    def test_country_code_non_alpha2_coerces_to_none(self) -> None:
+        # Lenient: "USA" isn't alpha-2, drop to None rather than lose the row.
+        assert LocationExtraction(country_code="USA").country_code is None
 
     def test_currency_uppercased(self) -> None:
         sal = SalaryExtraction(currency="eur")
         assert sal.currency == "EUR"
 
-    def test_currency_rejects_invalid_length(self) -> None:
-        with pytest.raises(ValidationError):
-            SalaryExtraction(currency="DOLLARS")
+    def test_currency_invalid_length_coerces_to_none(self) -> None:
+        assert SalaryExtraction(currency="DOLLARS").currency is None
 
-    def test_period_rejects_invalid_value(self) -> None:
-        with pytest.raises(ValidationError):
-            SalaryExtraction(period="weekly")
+    def test_period_unknown_coerces_to_none(self) -> None:
+        # "daily" / "weekly" aren't in our dim_salary vocabulary; keep the
+        # min/max/currency and drop just the period.
+        assert SalaryExtraction(period="weekly").period is None
+        assert SalaryExtraction(period="daily").period is None
 
-    def test_work_mode_rejects_wfh(self) -> None:
-        with pytest.raises(ValidationError):
-            JobEnrichment(
-                tech_skills=[],
-                soft_skills=[],
-                work_mode="WFH",
-            )
+    def test_work_mode_unknown_coerces_to_none(self) -> None:
+        enrichment = JobEnrichment(
+            tech_skills=[],
+            soft_skills=[],
+            work_mode="WFH",
+        )
+        assert enrichment.work_mode is None
 
     def test_work_mode_accepts_onsite_alias(self) -> None:
         enrichment = JobEnrichment(
@@ -154,6 +155,48 @@ class TestSchemaValidators:
             work_mode=None,
         )
         assert enrichment.work_mode is None
+
+    def test_salary_null_string_coerces_to_empty(self) -> None:
+        # Regression: Anthropic has been observed emitting "null" as a string
+        # for missing sub-objects instead of proper JSON null. That used to
+        # crash the whole enrichment.
+        e = JobEnrichment.model_validate(
+            {
+                "tech_skills": ["python"],
+                "soft_skills": [],
+                "location": {},
+                "work_mode": None,
+                "salary": "null",
+            }
+        )
+        assert isinstance(e.salary, SalaryExtraction)
+        assert e.salary.min_amount is None
+        assert e.salary.currency is None
+
+    def test_location_null_string_coerces_to_empty(self) -> None:
+        e = JobEnrichment.model_validate(
+            {
+                "tech_skills": [],
+                "soft_skills": [],
+                "location": "null",
+                "work_mode": None,
+                "salary": {},
+            }
+        )
+        assert isinstance(e.location, LocationExtraction)
+        assert e.location.city is None
+
+    def test_salary_none_coerces_to_empty(self) -> None:
+        e = JobEnrichment.model_validate(
+            {
+                "tech_skills": [],
+                "soft_skills": [],
+                "location": {},
+                "work_mode": None,
+                "salary": None,
+            }
+        )
+        assert isinstance(e.salary, SalaryExtraction)
 
 
 # --------------------------------------------------------------------------- #

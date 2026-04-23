@@ -13,6 +13,19 @@ from pydantic import BaseModel, Field, field_validator
 
 from job_research import constants as C
 
+# Values the LLM sometimes returns for "no data" that should be treated as
+# an empty object, not a hard validation failure. Anthropic has been
+# observed returning the literal string "null" for sub-objects.
+_EMPTY_SENTINELS: frozenset[str] = frozenset({"", "null", "none", "unknown", "n/a"})
+
+
+def _is_empty_sentinel(v: object) -> bool:
+    if v is None:
+        return True
+    if isinstance(v, str) and v.strip().lower() in _EMPTY_SENTINELS:
+        return True
+    return isinstance(v, dict) and not v
+
 
 # --------------------------------------------------------------------------- #
 # Sub-models
@@ -40,17 +53,13 @@ class LocationExtraction(BaseModel):
     @field_validator("country_code", mode="before")
     @classmethod
     def _normalise_country_code(cls, v: object) -> object:
-        if v is None:
+        """Coerce to ISO 3166-1 alpha-2 or None. Malformed values drop to None
+        rather than failing the whole enrichment."""
+        if v is None or not isinstance(v, str):
             return None
-        if not isinstance(v, str):
-            raise ValueError("country_code must be a string or null")
         s = v.strip().upper()
-        if not s:
+        if not s or len(s) != 2 or not s.isalpha():
             return None
-        if len(s) != 2 or not s.isalpha():
-            raise ValueError(
-                f"country_code must be ISO 3166-1 alpha-2 (2 letters), got {v!r}"
-            )
         return s
 
 
@@ -71,24 +80,24 @@ class SalaryExtraction(BaseModel):
     @field_validator("currency", mode="before")
     @classmethod
     def _normalise_currency(cls, v: object) -> object:
-        if v is None:
+        """Coerce to 3-letter ISO 4217 or None. Malformed drops to None."""
+        if v is None or not isinstance(v, str):
             return None
-        if not isinstance(v, str):
-            raise ValueError("currency must be a string or null")
         s = v.strip().upper()
-        if not s:
+        if not s or len(s) != 3 or not s.isalpha():
             return None
-        if len(s) != 3 or not s.isalpha():
-            raise ValueError(f"currency must be a 3-letter uppercase code, got {v!r}")
         return s
 
     @field_validator("period", mode="before")
     @classmethod
     def _normalise_period(cls, v: object) -> object:
+        """Unknown periods (e.g. 'daily', 'weekly') coerce to None rather than
+        failing the whole enrichment. We'd rather keep the min/max/currency
+        signal and drop just the period than lose the row."""
         if v is None:
             return None
         if not isinstance(v, str):
-            raise ValueError("period must be a string or null")
+            return None
         s = v.strip().lower()
         if not s:
             return None
@@ -97,9 +106,7 @@ class SalaryExtraction(BaseModel):
             C.SALARY_PERIOD_MONTHLY,
             C.SALARY_PERIOD_HOURLY,
         }
-        if s not in allowed:
-            raise ValueError(f"period must be one of {sorted(allowed)}, got {v!r}")
-        return s
+        return s if s in allowed else None
 
 
 # --------------------------------------------------------------------------- #
@@ -129,6 +136,18 @@ class JobEnrichment(BaseModel):
     )
     salary: SalaryExtraction = Field(default_factory=SalaryExtraction)
 
+    @field_validator("location", "salary", mode="before")
+    @classmethod
+    def _coerce_empty_sub_object(cls, v: object) -> object:
+        """Accept the LLM's many ways of saying 'no data' for a sub-object.
+
+        Anthropic has been observed emitting the literal string 'null' and
+        OpenAI sometimes emits an empty dict. Treat both as the empty model.
+        """
+        if _is_empty_sentinel(v):
+            return {}
+        return v
+
     @field_validator("tech_skills", "soft_skills", mode="before")
     @classmethod
     def _clean_skills(cls, v: object) -> list[str]:
@@ -153,22 +172,20 @@ class JobEnrichment(BaseModel):
     @field_validator("work_mode", mode="before")
     @classmethod
     def _normalise_work_mode(cls, v: object) -> object:
-        if v is None:
+        """Unknown / unparseable work_mode values coerce to None rather than
+        fail the whole enrichment. Known aliases are canonicalized."""
+        if v is None or not isinstance(v, str):
             return None
-        if not isinstance(v, str):
-            raise ValueError("work_mode must be a string or null")
         s = v.strip().lower()
         if not s:
             return None
-        # Accept a couple of common variants but reject everything else.
         aliases = {
             "onsite": C.WORK_MODE_ONSITE,
             "on site": C.WORK_MODE_ONSITE,
             "on_site": C.WORK_MODE_ONSITE,
+            "in-office": C.WORK_MODE_ONSITE,
+            "in office": C.WORK_MODE_ONSITE,
+            "office": C.WORK_MODE_ONSITE,
         }
         s = aliases.get(s, s)
-        if s not in C.WORK_MODES:
-            raise ValueError(
-                f"work_mode must be one of {sorted(C.WORK_MODES)}, got {v!r}"
-            )
-        return s
+        return s if s in C.WORK_MODES else None

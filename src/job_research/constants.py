@@ -31,7 +31,11 @@ SITE_INDEED: Final[str] = "indeed"
 SITE_GLASSDOOR: Final[str] = "glassdoor"
 SITE_GOOGLE: Final[str] = "google"
 SITE_ZIPRECRUITER: Final[str] = "zip_recruiter"
-DEFAULT_SITES: Final[tuple[str, ...]] = (SITE_LINKEDIN, SITE_INDEED, SITE_GLASSDOOR)
+# Glassdoor intentionally excluded from defaults: jobspy routinely fails to
+# resolve non-US locations ("Glassdoor: location not parsed") and the API
+# aggressively blocks from non-US IPs. Still available via opt-in on the
+# Search page or ALL_SITES if the user wants to try it.
+DEFAULT_SITES: Final[tuple[str, ...]] = (SITE_LINKEDIN, SITE_INDEED)
 ALL_SITES: Final[tuple[str, ...]] = (
     SITE_LINKEDIN,
     SITE_INDEED,
