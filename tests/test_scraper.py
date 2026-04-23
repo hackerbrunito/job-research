@@ -290,3 +290,64 @@ def test_missing_job_url_rows_filtered(
         "SELECT job_url FROM staging_job_offers WHERE run_id = 'run-4'"
     ).fetchall()
     assert rows == [("https://indeed.com/keep",)]
+
+
+# --------------------------------------------------------------------------- #
+# country_indeed parsing
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("location", "expected"),
+    [
+        ("London, UK", "uk"),
+        ("London, United Kingdom", "uk"),
+        ("Berlin, Germany", "germany"),
+        ("Spain", "spain"),
+        ("Hong Kong", "hongkong"),
+        ("San Francisco, USA", "usa"),
+        ("", None),
+        (None, None),
+        ("Atlantis", None),
+        ("Some City, Nowhere", None),
+    ],
+)
+def test_extract_country_indeed(location: str | None, expected: str | None) -> None:
+    assert scraper._extract_country_indeed(location) == expected
+
+
+def test_indeed_scrape_passes_country_indeed(mocker: MockerFixture) -> None:
+    """When site=indeed, country_indeed is inferred from location and forwarded."""
+    mock = mocker.patch.object(scraper, "scrape_jobs", return_value=pd.DataFrame())
+    scraper._scrape_one_site(
+        site=SITE_INDEED,
+        keyword="x",
+        location="Berlin, Germany",
+        cfg=scraper.ScrapingConfig(),
+    )
+    kwargs = mock.call_args.kwargs
+    assert kwargs.get("country_indeed") == "germany"
+
+
+def test_linkedin_scrape_does_not_pass_country_indeed(mocker: MockerFixture) -> None:
+    """country_indeed must only be sent to the indeed backend."""
+    mock = mocker.patch.object(scraper, "scrape_jobs", return_value=pd.DataFrame())
+    scraper._scrape_one_site(
+        site=SITE_LINKEDIN,
+        keyword="x",
+        location="Berlin, Germany",
+        cfg=scraper.ScrapingConfig(),
+    )
+    assert "country_indeed" not in mock.call_args.kwargs
+
+
+def test_indeed_scrape_omits_country_indeed_when_unresolved(
+    mocker: MockerFixture,
+) -> None:
+    """Unresolved country -> omit the kwarg so jobspy's own default kicks in."""
+    mock = mocker.patch.object(scraper, "scrape_jobs", return_value=pd.DataFrame())
+    scraper._scrape_one_site(
+        site=SITE_INDEED,
+        keyword="x",
+        location="Atlantis",
+        cfg=scraper.ScrapingConfig(),
+    )
+    assert "country_indeed" not in mock.call_args.kwargs

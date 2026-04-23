@@ -81,6 +81,35 @@ _PROGRAMMER_ERRORS: tuple[type[BaseException], ...] = (
 )
 
 
+def _extract_country_indeed(location: str | None) -> str | None:
+    """Best-effort: pull a country name out of a location string and map it
+    to a value that jobspy's Indeed backend accepts.
+
+    Examples:
+        "London, UK"           -> "uk"
+        "Berlin, Germany"      -> "germany"
+        "Spain"                -> "spain"
+        "San Francisco, USA"   -> "usa"
+        "Singapore"            -> "singapore"
+        "Some City, Nowhere"   -> None   (unrecognized; let jobspy default)
+    """
+    if not location:
+        return None
+    # Take the last comma-separated token — that's the country in almost every
+    # free-text location users type. Fall back to the whole string for
+    # single-token countries like "Spain" or "Singapore".
+    tail = location.rsplit(",", 1)[-1].strip()
+    if not tail:
+        return None
+    try:
+        from jobspy.model import Country  # type: ignore[import-not-found]
+
+        parsed = Country.from_string(tail.lower())
+        return parsed.name.lower()
+    except (ValueError, AttributeError, ImportError):
+        return None
+
+
 @dataclass(frozen=True)
 class ScrapeRequest:
     keyword: str
@@ -109,6 +138,15 @@ def _scrape_one_site(
     """Call jobspy for a single site with tenacity-driven retries."""
     proxies = cfg.proxy_list() or None
 
+    # Indeed needs its regional endpoint hint to return non-US results.
+    # Omit the kwarg (not pass None) when we can't confidently parse it, so
+    # jobspy's default still kicks in for other sites.
+    site_kwargs: dict[str, object] = {}
+    if site == "indeed":
+        country = _extract_country_indeed(location)
+        if country is not None:
+            site_kwargs["country_indeed"] = country
+
     @retry(
         stop=stop_after_attempt(max(1, cfg.max_retries)),
         wait=wait_exponential(multiplier=2, min=2, max=30),
@@ -126,6 +164,7 @@ def _scrape_one_site(
             description_format="markdown",
             proxies=proxies,
             verbose=1,
+            **site_kwargs,
         )
         return df if df is not None else pd.DataFrame()
 
