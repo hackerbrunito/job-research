@@ -79,6 +79,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S"]
 "src/job_research/app/**" = ["S"]  # Streamlit scripts don't need all security lints
+"src/job_research/app/pages/*.py" = ["S", "N999"]  # numeric-prefixed page filenames are a Streamlit convention
 
 [tool.ruff.format]
 quote-style = "double"
