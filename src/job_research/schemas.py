@@ -155,6 +155,27 @@ class JobEnrichment(BaseModel):
         description="One of: remote | hybrid | on-site. Null if unknown.",
     )
     salary: SalaryExtraction = Field(default_factory=SalaryExtraction)
+    is_relevant: bool = Field(
+        default=True,
+        description=(
+            "True if this job posting is a genuine match for the stated search intent. "
+            "False if it is a false positive (e.g. matched a keyword but is clearly "
+            "a different role)."
+        ),
+    )
+    relevance_confidence: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="Confidence in is_relevant (0-1). Use <0.7 for genuinely ambiguous cases.",
+    )
+    relevance_reason: str | None = Field(
+        default=None,
+        description=(
+            "One sentence explaining why this posting is or is not relevant. "
+            "Required when is_relevant=False or relevance_confidence<0.7."
+        ),
+    )
 
     @field_validator("location", "salary", mode="before")
     @classmethod

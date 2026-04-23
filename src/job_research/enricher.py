@@ -88,14 +88,26 @@ def _flush(con: duckdb.DuckDBPyConnection, rows: list[dict[str, Any]]) -> int:
 # Core
 # --------------------------------------------------------------------------- #
 _STAGING_SELECT = """
-SELECT s.id, s.title, s.description
+SELECT s.id, s.title, s.description, s.search_keyword,
+       s.profile_id, j.rule_verdict
 FROM staging_job_offers AS s
 LEFT JOIN int_enriched_job_info AS e ON e.job_id = s.id
+LEFT JOIN judged_job_offers AS j ON s.id = j.job_id
 WHERE e.job_id IS NULL
+  AND (j.rule_verdict IS NULL OR j.rule_verdict != 'reject')
 {run_filter}
 ORDER BY s.scraped_at
 {limit_clause}
 """
+
+
+def _compute_ensemble(rule_verdict: str | None, llm_is_relevant: bool) -> str:
+    """Derive ensemble_verdict from rule filter + LLM signal."""
+    if rule_verdict == "reject":
+        return "reject"
+    if llm_is_relevant:
+        return "accept"
+    return "reject"
 
 
 def enrich_staging(
@@ -153,11 +165,13 @@ def enrich_staging(
         batch: list[dict[str, Any]] = []
 
         for row in pending:
-            job_id, title, description = row
+            job_id, title, description, search_keyword, profile_id, rule_verdict = row
             attempted += 1
             try:
                 enrichment = provider.enrich(
-                    title=title or "", description=description or ""
+                    title=title or "",
+                    description=description or "",
+                    search_keyword=search_keyword or "",
                 )
             except ValidationError as exc:
                 failed += 1
@@ -184,6 +198,35 @@ def enrich_staging(
                     provider_name=provider.provider_name,
                     model_name=provider.model_name,
                 )
+            )
+
+            # Write LLM verdict to judged_job_offers (upsert).
+            ensemble = _compute_ensemble(rule_verdict, enrichment.is_relevant)
+            conn.execute(
+                """
+                INSERT INTO judged_job_offers
+                    (job_id, profile_id, search_keyword, job_title,
+                     rule_verdict, llm_is_relevant, llm_confidence,
+                     llm_reason, ensemble_verdict, judged_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT (job_id) DO UPDATE SET
+                    llm_is_relevant  = excluded.llm_is_relevant,
+                    llm_confidence   = excluded.llm_confidence,
+                    llm_reason       = excluded.llm_reason,
+                    ensemble_verdict = excluded.ensemble_verdict,
+                    judged_at        = excluded.judged_at
+                """,
+                [
+                    job_id,
+                    profile_id,
+                    search_keyword,
+                    title,
+                    rule_verdict or "accept",
+                    enrichment.is_relevant,
+                    enrichment.relevance_confidence,
+                    enrichment.relevance_reason,
+                    ensemble,
+                ],
             )
             succeeded += 1
 

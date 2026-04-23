@@ -335,3 +335,80 @@ def test_transform_empty_intermediate_is_safe(
     assert summary.dim_location_rows == 0
     assert summary.fact_rows == 0
     assert summary.marts_refreshed == 4
+
+
+# --------------------------------------------------------------------------- #
+# Verdict-filter tests (Wave 7A)
+# --------------------------------------------------------------------------- #
+def _seed_one_row(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    jid: str,
+    ensemble_verdict: str | None,
+) -> None:
+    """Insert a minimal staging + enriched row, with optional judged entry."""
+    now = datetime(2026, 4, 23, 12, 0, 0)
+    con.execute(
+        """
+        INSERT INTO staging_job_offers (
+            id, scraped_at, run_id, site, search_keyword, job_url, title
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            jid,
+            now,
+            "run-v7",
+            "linkedin",
+            "python",
+            f"https://example.test/{jid}",
+            "Dev",
+        ],
+    )
+    con.execute(
+        """
+        INSERT INTO int_enriched_job_info (
+            job_id, enriched_at, llm_provider, llm_model,
+            tech_skills, soft_skills
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        [jid, now, "fake", "fake-1", json.dumps(["python"]), json.dumps([])],
+    )
+    if ensemble_verdict is not None:
+        con.execute(
+            """
+            INSERT INTO judged_job_offers
+                (job_id, rule_verdict, ensemble_verdict, judged_at)
+            VALUES (?, 'accept', ?, CURRENT_TIMESTAMP)
+            """,
+            [jid, ensemble_verdict],
+        )
+
+
+def test_transform_excludes_rejected_rows(
+    tmp_duckdb: duckdb.DuckDBPyConnection,
+) -> None:
+    """Rows with ensemble_verdict='reject' must not appear in fact_job_offers."""
+    _seed_one_row(tmp_duckdb, jid="j-reject", ensemble_verdict="reject")
+    run_transform(con=tmp_duckdb)
+    count = tmp_duckdb.execute("SELECT COUNT(*) FROM fact_job_offers").fetchone()[0]
+    assert count == 0
+
+
+def test_transform_includes_accepted_rows(
+    tmp_duckdb: duckdb.DuckDBPyConnection,
+) -> None:
+    """Rows with ensemble_verdict='accept' must appear in fact_job_offers."""
+    _seed_one_row(tmp_duckdb, jid="j-accept", ensemble_verdict="accept")
+    run_transform(con=tmp_duckdb)
+    count = tmp_duckdb.execute("SELECT COUNT(*) FROM fact_job_offers").fetchone()[0]
+    assert count == 1
+
+
+def test_transform_includes_legacy_rows_without_judged_entry(
+    tmp_duckdb: duckdb.DuckDBPyConnection,
+) -> None:
+    """Pre-Wave-7A rows (no judged entry) must still flow through to fact."""
+    _seed_one_row(tmp_duckdb, jid="j-legacy", ensemble_verdict=None)
+    run_transform(con=tmp_duckdb)
+    count = tmp_duckdb.execute("SELECT COUNT(*) FROM fact_job_offers").fetchone()[0]
+    assert count == 1

@@ -32,6 +32,71 @@ from job_research.logging_setup import get_logger
 log = get_logger(__name__)
 
 STAGING_TABLE = "staging_job_offers"
+JUDGED_TABLE = "judged_job_offers"
+
+# Stopwords stripped before computing title/keyword overlap.
+_STOPWORDS: frozenset[str] = frozenset(
+    {"a", "an", "the", "of", "at", "in", "for", "and", "or", "with", "to", "is", "are"}
+)
+
+
+# --------------------------------------------------------------------------- #
+# Keyword helpers
+# --------------------------------------------------------------------------- #
+def _quote_keyword(keyword: str) -> str:
+    """Wrap multi-word keywords in double quotes for phrase matching.
+
+    LinkedIn and Indeed honour quoted phrases, which reduces false positives
+    from the scraper. The original unquoted form is kept in all staging columns
+    so the label remains human-readable.
+    """
+    stripped = keyword.strip()
+    if " " in stripped:
+        return f'"{stripped}"'
+    return stripped
+
+
+def _tokenize(text: str) -> set[str]:
+    """Lowercase, strip punctuation, remove stopwords."""
+    tokens = (
+        text.lower()
+        .translate(str.maketrans("", "", "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"))
+        .split()
+    )
+    return {t for t in tokens if t and t not in _STOPWORDS}
+
+
+def _rule_title_filter(title: str | None, keyword: str) -> tuple[str, str]:
+    """Return (verdict, reason) based on title/keyword word overlap.
+
+    Jaccard score = |shared words| / |union of words| (stopwords excluded).
+    Thresholds:
+        >= 0.5  → 'accept'
+        >= 0.15 → 'review'
+        else    → 'reject'
+    """
+    if not title:
+        return "review", "title_overlap=0.00"
+
+    title_tokens = _tokenize(title)
+    keyword_tokens = _tokenize(keyword)
+
+    if not keyword_tokens:
+        return "review", "title_overlap=0.00"
+
+    intersection = title_tokens & keyword_tokens
+    union = title_tokens | keyword_tokens
+    score = len(intersection) / len(union) if union else 0.0
+
+    if score >= 0.5:
+        verdict = "accept"
+    elif score >= 0.15:
+        verdict = "review"
+    else:
+        verdict = "reject"
+
+    return verdict, f"title_overlap={score:.2f}"
+
 
 # Columns we persist in staging, in the order expected by `raw_payload` serialization.
 _STAGING_COLUMNS: tuple[str, ...] = (
@@ -157,7 +222,7 @@ def _scrape_one_site(
     def _call() -> pd.DataFrame:
         df = scrape_jobs(
             site_name=[site],
-            search_term=keyword,
+            search_term=_quote_keyword(keyword),
             location=location,
             results_wanted=cfg.max_results_per_site,
             hours_old=cfg.hours_old,
@@ -367,6 +432,28 @@ def _run(
             result.per_site_counts[site] = inserted
             result.per_site_errors.setdefault(site, "")
             result.rows += inserted
+
+            # Write rule verdicts for every newly inserted staging row.
+            if inserted > 0:
+                verdict_records: list[dict[str, Any]] = []
+                for _, srow in staging_df.iterrows():
+                    rv, rr = _rule_title_filter(srow.get("title"), req.keyword)
+                    verdict_records.append(
+                        {
+                            "job_id": srow["id"],
+                            "profile_id": profile_id,
+                            "search_keyword": req.keyword,
+                            "job_title": srow.get("title"),
+                            "rule_verdict": rv,
+                            "rule_reason": rr,
+                            "llm_is_relevant": None,
+                            "llm_confidence": None,
+                            "llm_reason": None,
+                            "ensemble_verdict": rv,
+                        }
+                    )
+                verdict_df = pd.DataFrame(verdict_records)
+                insert_dataframe(con, verdict_df, JUDGED_TABLE)
 
             log.info(
                 "scrape.site.done",

@@ -66,17 +66,26 @@ SYSTEM_PROMPT: str = (
     "hourly).\n"
     "\n"
     "Use null / empty list for anything the posting does not explicitly "
-    "state. Do not guess or infer."
+    "state. Do not guess or infer.\n"
+    "\n"
+    "Also assess relevance:\n"
+    "- is_relevant: true if this posting is a genuine match for the search_intent stated\n"
+    "  in the user message. False if it matched a keyword by coincidence but is clearly\n"
+    "  a different role (e.g. 'Marketing Manager' when searching for 'Store Development\n"
+    "  Manager'). Default true when uncertain — use false only for clear mismatches.\n"
+    "- relevance_confidence: 0-1. Use <0.7 for genuinely ambiguous titles.\n"
+    "- relevance_reason: one sentence when is_relevant=false or confidence<0.7."
 )
 
 TOOL_NAME: str = "emit_enrichment"
 
 
-def _user_content(*, title: str, description: str) -> str:
+def _user_content(*, title: str, description: str, search_keyword: str = "") -> str:
     """Format a single job posting as a user message."""
     title = (title or "").strip() or "(untitled)"
     description = (description or "").strip() or "(no description)"
-    return f"Job title: {title}\n\nJob description:\n{description}"
+    intent_line = f"Search intent: {search_keyword}\n\n" if search_keyword else ""
+    return f"{intent_line}Job title: {title}\n\nJob description:\n{description}"
 
 
 # --------------------------------------------------------------------------- #
@@ -89,7 +98,9 @@ class LLMProvider(Protocol):
     provider_name: str
     model_name: str
 
-    def enrich(self, *, title: str, description: str) -> JobEnrichment: ...
+    def enrich(
+        self, *, title: str, description: str, search_keyword: str = ""
+    ) -> JobEnrichment: ...
 
 
 # --------------------------------------------------------------------------- #
@@ -146,7 +157,9 @@ class AnthropicProvider:
             "input_schema": JobEnrichment.model_json_schema(),
         }
 
-    def enrich(self, *, title: str, description: str) -> JobEnrichment:
+    def enrich(
+        self, *, title: str, description: str, search_keyword: str = ""
+    ) -> JobEnrichment:
         @_build_retry(_ANTHROPIC_RETRY, self._cfg.max_retries)
         def _call() -> JobEnrichment:
             response = self._client.messages.create(
@@ -159,7 +172,11 @@ class AnthropicProvider:
                 messages=[
                     {
                         "role": "user",
-                        "content": _user_content(title=title, description=description),
+                        "content": _user_content(
+                            title=title,
+                            description=description,
+                            search_keyword=search_keyword,
+                        ),
                     }
                 ],
             )
@@ -197,7 +214,9 @@ class _OpenAIStyleProvider:
             client_kwargs["base_url"] = base_url
         self._client = openai.OpenAI(**client_kwargs)  # type: ignore[arg-type]
 
-    def enrich(self, *, title: str, description: str) -> JobEnrichment:
+    def enrich(
+        self, *, title: str, description: str, search_keyword: str = ""
+    ) -> JobEnrichment:
         @_build_retry(_OPENAI_RETRY, self._cfg.max_retries)
         def _call() -> JobEnrichment:
             completion = self._client.beta.chat.completions.parse(
@@ -209,7 +228,11 @@ class _OpenAIStyleProvider:
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {
                         "role": "user",
-                        "content": _user_content(title=title, description=description),
+                        "content": _user_content(
+                            title=title,
+                            description=description,
+                            search_keyword=search_keyword,
+                        ),
                     },
                 ],
             )

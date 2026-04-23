@@ -110,7 +110,12 @@ def _run(con: duckdb.DuckDBPyConnection) -> TransformSummary:
 
 
 def _load_enriched(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
-    """Load the staging+intermediate join into a DataFrame."""
+    """Load the staging+intermediate join into a DataFrame.
+
+    Only rows that passed the verdict layer are included:
+    - ensemble_verdict = 'accept'   — explicitly accepted by rule + LLM
+    - ensemble_verdict IS NULL      — legacy rows pre-Wave-7A (no judged entry)
+    """
     return con.execute(
         """
         SELECT
@@ -138,6 +143,9 @@ def _load_enriched(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
             i.salary_period
         FROM staging_job_offers s
         JOIN int_enriched_job_info i ON s.id = i.job_id
+        LEFT JOIN judged_job_offers j ON s.id = j.job_id
+        WHERE j.ensemble_verdict = 'accept'
+           OR j.ensemble_verdict IS NULL
         """
     ).df()
 

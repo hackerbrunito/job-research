@@ -101,6 +101,7 @@ def load_sql(name: str, *, kind: str = "dml") -> str:
 _INSERTABLE_TABLES: frozenset[str] = frozenset(
     {
         "staging_job_offers",
+        "judged_job_offers",
         "int_enriched_job_info",
         "dim_location",
         "dim_salary",

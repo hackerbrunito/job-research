@@ -16,7 +16,12 @@ from pytest_mock import MockerFixture
 from job_research import scraper
 from job_research.constants import SITE_INDEED, SITE_LINKEDIN
 from job_research.database import job_id
-from job_research.scraper import ScrapeRequest, scrape_to_staging
+from job_research.scraper import (
+    ScrapeRequest,
+    _quote_keyword,
+    _rule_title_filter,
+    scrape_to_staging,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -351,3 +356,83 @@ def test_indeed_scrape_omits_country_indeed_when_unresolved(
         cfg=scraper.ScrapingConfig(),
     )
     assert "country_indeed" not in mock.call_args.kwargs
+
+
+# --------------------------------------------------------------------------- #
+# _quote_keyword
+# --------------------------------------------------------------------------- #
+def test_quote_keyword_wraps_multiword() -> None:
+    assert _quote_keyword("Store Development Manager") == '"Store Development Manager"'
+
+
+def test_quote_keyword_leaves_single_word() -> None:
+    assert _quote_keyword("python") == "python"
+
+
+# --------------------------------------------------------------------------- #
+# _rule_title_filter
+# --------------------------------------------------------------------------- #
+def test_rule_filter_accept() -> None:
+    verdict, reason = _rule_title_filter(
+        "Store Development Manager", "Store Development Manager"
+    )
+    assert verdict == "accept"
+    assert "title_overlap=" in reason
+
+
+def test_rule_filter_review() -> None:
+    verdict, reason = _rule_title_filter(
+        "Restaurant Assistant Manager", "Store Development Manager"
+    )
+    assert verdict == "review"
+    assert "title_overlap=" in reason
+
+
+def test_rule_filter_reject() -> None:
+    verdict, reason = _rule_title_filter("Lawn Operative", "Store Development Manager")
+    assert verdict == "reject"
+    assert "title_overlap=" in reason
+
+
+# --------------------------------------------------------------------------- #
+# Verdict rows written to judged_job_offers
+# --------------------------------------------------------------------------- #
+def test_rule_verdicts_written_to_judged_table(
+    tmp_duckdb: duckdb.DuckDBPyConnection, mocker: MockerFixture
+) -> None:
+    """After scrape_to_staging, judged_job_offers has one row per inserted staging row."""
+    df = _make_df(
+        [
+            {
+                "site": SITE_INDEED,
+                "job_url": "https://indeed.com/jobs/verdict-1",
+                "title": "Store Development Manager",
+                "company": "RetailCo",
+            },
+            {
+                "site": SITE_INDEED,
+                "job_url": "https://indeed.com/jobs/verdict-2",
+                "title": "Lawn Operative",
+                "company": "GreenCo",
+            },
+        ]
+    )
+    mocker.patch.object(scraper, "scrape_jobs", return_value=df)
+
+    req = ScrapeRequest(
+        keyword="Store Development Manager",
+        sites=(SITE_INDEED,),
+    )
+    results = scrape_to_staging("run-verdict", [req], con=tmp_duckdb)
+
+    assert results[0].rows == 2
+
+    judged = tmp_duckdb.execute(
+        "SELECT job_id, rule_verdict, ensemble_verdict FROM judged_job_offers ORDER BY job_id"
+    ).fetchall()
+    assert len(judged) == 2
+    for _job_id, rule_verdict, ensemble_verdict in judged:
+        assert rule_verdict is not None
+        assert ensemble_verdict is not None
+        assert rule_verdict in {"accept", "review", "reject"}
+        assert ensemble_verdict == rule_verdict

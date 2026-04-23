@@ -31,10 +31,12 @@ class _FakeProvider:
 
     def __init__(self, responses: dict[str, JobEnrichment | Exception]) -> None:
         self.responses = responses
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[tuple[str, str, str]] = []
 
-    def enrich(self, *, title: str, description: str) -> JobEnrichment:
-        self.calls.append((title, description))
+    def enrich(
+        self, *, title: str, description: str, search_keyword: str = ""
+    ) -> JobEnrichment:
+        self.calls.append((title, description, search_keyword))
         key = title.strip() or description[:20]
         value = self.responses[key]
         if isinstance(value, Exception):
@@ -354,6 +356,100 @@ class TestEnrichStaging:
         summary = enrich_staging(provider=provider, con=tmp_duckdb, limit=2)
         assert summary.attempted == 2
         assert summary.succeeded == 2
+
+    def test_enricher_passes_search_keyword_to_provider(
+        self, tmp_duckdb: duckdb.DuckDBPyConnection
+    ) -> None:
+        """enrich_staging must forward search_keyword to provider.enrich()."""
+        _insert_staging(
+            tmp_duckdb,
+            job_id="j1",
+            title="Store Dev Manager",
+            description="Oversee store openings",
+        )
+        provider = _FakeProvider({"Store Dev Manager": _make_enrichment()})
+        enrich_staging(provider=provider, con=tmp_duckdb)
+
+        assert len(provider.calls) == 1
+        _title, _desc, kw = provider.calls[0]
+        # The fixture uses search_keyword="python" (set in _insert_staging).
+        assert kw == "python"
+
+    def test_enricher_skips_rule_rejected_rows(
+        self, tmp_duckdb: duckdb.DuckDBPyConnection
+    ) -> None:
+        """Rows with rule_verdict='reject' must not be sent to the LLM."""
+        _insert_staging(
+            tmp_duckdb,
+            job_id="j1",
+            title="Marketing Manager",
+            description="Run campaigns",
+        )
+        # Insert a pre-existing judged row that rule-rejected this job.
+        tmp_duckdb.execute(
+            """
+            INSERT INTO judged_job_offers
+                (job_id, rule_verdict, ensemble_verdict, judged_at)
+            VALUES ('j1', 'reject', 'reject', CURRENT_TIMESTAMP)
+            """
+        )
+
+        provider = _FakeProvider({})
+        summary = enrich_staging(provider=provider, con=tmp_duckdb)
+
+        assert summary.attempted == 0
+        assert provider.calls == []
+
+    def test_enricher_writes_llm_accept_to_judged_table(
+        self, tmp_duckdb: duckdb.DuckDBPyConnection
+    ) -> None:
+        """When LLM says is_relevant=True, ensemble_verdict must be 'accept'."""
+        _insert_staging(
+            tmp_duckdb,
+            job_id="j1",
+            title="Python Dev",
+            description="Build APIs",
+        )
+        enrichment = _make_enrichment()
+        # Default is_relevant=True, relevance_confidence=1.0
+        provider = _FakeProvider({"Python Dev": enrichment})
+        enrich_staging(provider=provider, con=tmp_duckdb)
+
+        row = tmp_duckdb.execute(
+            "SELECT llm_is_relevant, ensemble_verdict FROM judged_job_offers WHERE job_id = 'j1'"
+        ).fetchone()
+        assert row is not None
+        llm_is_relevant, ensemble_verdict = row
+        assert llm_is_relevant is True
+        assert ensemble_verdict == "accept"
+
+    def test_enricher_writes_llm_reject_to_judged_table(
+        self, tmp_duckdb: duckdb.DuckDBPyConnection
+    ) -> None:
+        """When LLM says is_relevant=False, ensemble_verdict must be 'reject'."""
+        _insert_staging(
+            tmp_duckdb,
+            job_id="j1",
+            title="Marketing Manager",
+            description="Run brand campaigns",
+        )
+        enrichment = JobEnrichment(
+            tech_skills=[],
+            soft_skills=["collaborative"],
+            is_relevant=False,
+            relevance_confidence=0.9,
+            relevance_reason="Clearly a marketing role, not a tech role.",
+        )
+        provider = _FakeProvider({"Marketing Manager": enrichment})
+        enrich_staging(provider=provider, con=tmp_duckdb)
+
+        row = tmp_duckdb.execute(
+            "SELECT llm_is_relevant, ensemble_verdict FROM judged_job_offers WHERE job_id = 'j1'"
+        ).fetchone()
+        assert row is not None
+        llm_is_relevant, ensemble_verdict = row
+        assert llm_is_relevant is False
+        assert ensemble_verdict == "reject"
 
     def test_run_id_filter(self, tmp_duckdb: duckdb.DuckDBPyConnection) -> None:
         _insert_staging(
