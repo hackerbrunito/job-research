@@ -108,6 +108,7 @@ _INSERTABLE_TABLES: frozenset[str] = frozenset(
         "fact_job_offers",
         "job_skill_bridge",
         "user_search_config",
+        "user_search_profiles",
     }
 )
 
@@ -157,13 +158,21 @@ def record_run_start(
     keywords: list[str],
     locations: list[str],
     sites: list[str],
+    profile_id: str | None = None,
 ) -> None:
     con.execute(
         """
-        INSERT INTO pipeline_runs (run_id, started_at, status, keywords, locations, sites)
-        VALUES (?, ?, 'running', ?, ?, ?)
+        INSERT INTO pipeline_runs (run_id, profile_id, started_at, status, keywords, locations, sites)
+        VALUES (?, ?, ?, 'running', ?, ?, ?)
         """,
-        [run_id, datetime.now(UTC).replace(tzinfo=None), keywords, locations, sites],
+        [
+            run_id,
+            profile_id,
+            datetime.now(UTC).replace(tzinfo=None),
+            keywords,
+            locations,
+            sites,
+        ],
     )
 
 

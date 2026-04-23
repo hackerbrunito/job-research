@@ -38,6 +38,7 @@ _STAGING_COLUMNS: tuple[str, ...] = (
     "id",
     "scraped_at",
     "run_id",
+    "profile_id",
     "site",
     "search_keyword",
     "search_location",
@@ -210,6 +211,7 @@ def _build_staging_dataframe(
     df: pd.DataFrame,
     *,
     run_id: str,
+    profile_id: str | None,
     request: ScrapeRequest,
     scraped_at: datetime,
 ) -> pd.DataFrame:
@@ -233,6 +235,7 @@ def _build_staging_dataframe(
                 "id": job_id(site, str(job_url)),
                 "scraped_at": scraped_at,
                 "run_id": run_id,
+                "profile_id": profile_id,
                 "site": site,
                 "search_keyword": request.keyword,
                 "search_location": request.location,
@@ -285,24 +288,28 @@ def scrape_to_staging(
     run_id: str,
     requests: list[ScrapeRequest],
     *,
+    profile_id: str | None = None,
     con: duckdb.DuckDBPyConnection | None = None,
 ) -> list[ScrapeResult]:
     """Scrape each request, write rows to staging_job_offers, return results.
 
     Each (request, site) pair is a separate jobspy call so a failure on one
     site does not abort the others. A per-request result records row counts
-    and any site-level errors.
+    and any site-level errors. `profile_id` tags every inserted row so the
+    dashboard can filter by saved search.
     """
     if con is None:
         with connect() as owned_con:
-            return _run(run_id, requests, owned_con)
-    return _run(run_id, requests, con)
+            return _run(run_id, requests, owned_con, profile_id=profile_id)
+    return _run(run_id, requests, con, profile_id=profile_id)
 
 
 def _run(
     run_id: str,
     requests: list[ScrapeRequest],
     con: duckdb.DuckDBPyConnection,
+    *,
+    profile_id: str | None = None,
 ) -> list[ScrapeResult]:
     cfg = get_settings().scraping
     results: list[ScrapeResult] = []
@@ -345,6 +352,7 @@ def _run(
             staging_df = _build_staging_dataframe(
                 df,
                 run_id=run_id,
+                profile_id=profile_id,
                 request=req,
                 scraped_at=datetime.now(UTC).replace(tzinfo=None),
             )

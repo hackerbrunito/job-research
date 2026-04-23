@@ -1,14 +1,15 @@
--- Full-refresh mart_salary_by_keyword with p25/p50/p75 percentiles
--- on min_amount and max_amount.
+-- Full-refresh mart_salary_by_keyword with p25/p50/p75 percentiles,
+-- keyed by (profile_id, search_keyword, currency, period).
 DELETE FROM mart_salary_by_keyword;
 
 INSERT INTO mart_salary_by_keyword (
-    search_keyword, currency, period,
+    profile_id, search_keyword, currency, period,
     p25_min, p50_min, p75_min,
     p25_max, p50_max, p75_max,
     observation_count, refreshed_at
 )
 SELECT
+    COALESCE(f.profile_id, '')                         AS profile_id,
     f.search_keyword                                   AS search_keyword,
     COALESCE(s.currency, '')                           AS currency,
     COALESCE(s.period, '')                             AS period,
@@ -23,4 +24,4 @@ SELECT
 FROM fact_job_offers f
 JOIN dim_salary s USING (salary_key)
 WHERE s.min_amount IS NOT NULL OR s.max_amount IS NOT NULL
-GROUP BY f.search_keyword, COALESCE(s.currency, ''), COALESCE(s.period, '');
+GROUP BY COALESCE(f.profile_id, ''), f.search_keyword, COALESCE(s.currency, ''), COALESCE(s.period, '');

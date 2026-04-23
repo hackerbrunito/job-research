@@ -1,16 +1,19 @@
 """Shared helpers for the Streamlit dashboard pages.
 
-The module is deliberately split so that pure-Python helpers (DB queries,
-config round-tripping) can be unit-tested without a running Streamlit
-session. The Streamlit-only wrappers are defined at the bottom and gated
-by a try/except import.
+Pure-Python helpers (DB queries, profile CRUD) are kept testable without a
+running Streamlit session. Streamlit-only wrappers live at the bottom and
+are gated by a try/except import.
 """
 
 from __future__ import annotations
 
 import json
+import re
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Final
 
 import duckdb
@@ -29,91 +32,204 @@ DEFAULT_FACT_LIMIT: Final[int] = 500
 MAX_FACT_LIMIT: Final[int] = 5000
 CACHE_TTL_SECONDS: Final[int] = 60
 
-CONFIG_KEY_KEYWORDS: Final[str] = "keywords"
-CONFIG_KEY_LOCATIONS: Final[str] = "locations"
-CONFIG_KEY_SITES: Final[str] = "sites"
-
-_CONFIG_KEYS: Final[tuple[str, ...]] = (
-    CONFIG_KEY_KEYWORDS,
-    CONFIG_KEY_LOCATIONS,
-    CONFIG_KEY_SITES,
-)
-
-# Sensible defaults when the table is empty.
-_DEFAULT_KEYWORDS: Final[tuple[str, ...]] = ("AI Cybersecurity", "Data Engineer")
-_DEFAULT_LOCATIONS: Final[tuple[str, ...]] = ("London, UK", "Berlin, Germany")
+# Defaults seeded into a first-run profile.
+_DEFAULT_KEYWORDS: Final[tuple[str, ...]] = ("Data Engineer",)
+_DEFAULT_LOCATIONS: Final[tuple[str, ...]] = ("London, UK",)
 
 
 # --------------------------------------------------------------------------- #
-# Config round-tripping
+# Profile model
 # --------------------------------------------------------------------------- #
-def get_search_config(con: duckdb.DuckDBPyConnection) -> dict[str, list[str]]:
-    """Read user_search_config into a {keywords, locations, sites} dict.
+@dataclass
+class Profile:
+    profile_id: str
+    name: str
+    description: str | None = None
+    keywords: list[str] = field(default_factory=list)
+    locations: list[str] = field(default_factory=list)
+    sites: list[str] = field(default_factory=lambda: list(C.DEFAULT_SITES))
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
-    Returns sensible defaults if the table is empty or any key is missing.
-    """
+
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def slugify(name: str) -> str:
+    """Human-readable name → url-safe id. Empty input raises."""
+    s = _SLUG_RE.sub("-", name.strip().lower()).strip("-")
+    if not s:
+        raise ValueError("profile name must contain at least one alphanumeric char")
+    return s
+
+
+def _parse_list(raw: object) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(x) for x in raw]
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        return [str(x) for x in parsed] if isinstance(parsed, list) else []
+    return []
+
+
+def _row_to_profile(row: tuple) -> Profile:
+    return Profile(
+        profile_id=row[0],
+        name=row[1],
+        description=row[2],
+        keywords=_parse_list(row[3]),
+        locations=_parse_list(row[4]),
+        sites=_parse_list(row[5]),
+        created_at=row[6],
+        updated_at=row[7],
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Profile CRUD
+# --------------------------------------------------------------------------- #
+def list_profiles(con: duckdb.DuckDBPyConnection) -> list[Profile]:
+    """Return every saved profile ordered by updated_at desc."""
     rows = con.execute(
-        "SELECT key, value FROM user_search_config WHERE key IN (?, ?, ?)",
-        list(_CONFIG_KEYS),
+        """
+        SELECT profile_id, name, description, keywords, locations, sites,
+               created_at, updated_at
+        FROM user_search_profiles
+        ORDER BY updated_at DESC
+        """
     ).fetchall()
-
-    stored: dict[str, list[str]] = {}
-    for key, raw in rows:
-        parsed = raw if isinstance(raw, list) else json.loads(raw)
-        stored[key] = [str(x) for x in parsed]
-
-    return {
-        CONFIG_KEY_KEYWORDS: stored.get(CONFIG_KEY_KEYWORDS, list(_DEFAULT_KEYWORDS)),
-        CONFIG_KEY_LOCATIONS: stored.get(
-            CONFIG_KEY_LOCATIONS, list(_DEFAULT_LOCATIONS)
-        ),
-        CONFIG_KEY_SITES: stored.get(CONFIG_KEY_SITES, list(C.DEFAULT_SITES)),
-    }
+    return [_row_to_profile(r) for r in rows]
 
 
-def save_search_config(
-    con: duckdb.DuckDBPyConnection,
-    *,
-    keywords: list[str],
-    locations: list[str],
-    sites: list[str],
-) -> None:
-    """Upsert all three keys atomically."""
-    payload: dict[str, list[str]] = {
-        CONFIG_KEY_KEYWORDS: [k.strip() for k in keywords if k.strip()],
-        CONFIG_KEY_LOCATIONS: [loc.strip() for loc in locations if loc.strip()],
-        CONFIG_KEY_SITES: [s for s in sites if s in C.ALL_SITES],
-    }
+def get_profile(con: duckdb.DuckDBPyConnection, profile_id: str) -> Profile | None:
+    row = con.execute(
+        """
+        SELECT profile_id, name, description, keywords, locations, sites,
+               created_at, updated_at
+        FROM user_search_profiles
+        WHERE profile_id = ?
+        """,
+        [profile_id],
+    ).fetchone()
+    return _row_to_profile(row) if row else None
+
+
+def save_profile(con: duckdb.DuckDBPyConnection, profile: Profile) -> None:
+    """Insert or update a profile atomically. Rejects empty name/keywords."""
+    name = profile.name.strip()
+    if not name:
+        raise ValueError("profile name cannot be blank")
+
+    keywords = [k.strip() for k in profile.keywords if k.strip()]
+    if not keywords:
+        raise ValueError("profile must have at least one keyword")
+
+    locations = [loc.strip() for loc in profile.locations if loc.strip()]
+    sites = [s for s in profile.sites if s in C.ALL_SITES]
+    if not sites:
+        sites = list(C.DEFAULT_SITES)
+
+    pid = profile.profile_id or slugify(name)
 
     con.execute("BEGIN TRANSACTION")
     try:
-        for key, value in payload.items():
-            con.execute(
-                "DELETE FROM user_search_config WHERE key = ?",
-                [key],
+        con.execute("DELETE FROM user_search_profiles WHERE profile_id = ?", [pid])
+        con.execute(
+            """
+            INSERT INTO user_search_profiles (
+                profile_id, name, description, keywords, locations, sites,
+                created_at, updated_at
             )
-            con.execute(
-                """
-                INSERT INTO user_search_config (key, value, updated_at)
-                VALUES (?, ?, CURRENT_TIMESTAMP)
-                """,
-                [key, json.dumps(value)],
-            )
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            [
+                pid,
+                name,
+                (profile.description or "").strip() or None,
+                json.dumps(keywords),
+                json.dumps(locations),
+                json.dumps(sites),
+            ],
+        )
         con.execute("COMMIT")
     except Exception:
         con.execute("ROLLBACK")
         raise
 
     log.info(
-        "user_config.saved",
-        keywords=len(payload[CONFIG_KEY_KEYWORDS]),
-        locations=len(payload[CONFIG_KEY_LOCATIONS]),
-        sites=len(payload[CONFIG_KEY_SITES]),
+        "profile.saved",
+        profile_id=pid,
+        keywords=len(keywords),
+        locations=len(locations),
+        sites=len(sites),
     )
 
 
+def delete_profile(con: duckdb.DuckDBPyConnection, profile_id: str) -> None:
+    """Delete a profile. Does NOT cascade to fact_job_offers — rows stay
+    and can still be inspected by run_id, but lose their profile filter."""
+    con.execute("DELETE FROM user_search_profiles WHERE profile_id = ?", [profile_id])
+    log.info("profile.deleted", profile_id=profile_id)
+
+
+def ensure_default_profile(con: duckdb.DuckDBPyConnection) -> Profile:
+    """Create a 'default' profile if none exist; seed from legacy
+    `user_search_config` if it has data. Idempotent."""
+    existing = list_profiles(con)
+    if existing:
+        return existing[0]
+
+    # Migrate from the legacy single-row table if anything's there.
+    legacy: dict[str, list[str]] = {}
+    try:
+        rows = con.execute("SELECT key, value FROM user_search_config").fetchall()
+    except duckdb.Error:
+        rows = []
+    for key, raw in rows:
+        legacy[key] = _parse_list(raw)
+
+    profile = Profile(
+        profile_id=C.DEFAULT_PROFILE_ID,
+        name=C.DEFAULT_PROFILE_NAME,
+        keywords=legacy.get("keywords") or list(_DEFAULT_KEYWORDS),
+        locations=legacy.get("locations") or list(_DEFAULT_LOCATIONS),
+        sites=legacy.get("sites") or list(C.DEFAULT_SITES),
+    )
+    save_profile(con, profile)
+    return profile
+
+
+def create_profile_from_name(
+    con: duckdb.DuckDBPyConnection,
+    name: str,
+    *,
+    keywords: list[str] | None = None,
+    locations: list[str] | None = None,
+    sites: list[str] | None = None,
+) -> Profile:
+    """Shortcut: build a Profile, save it, return it."""
+    pid = slugify(name)
+    # Ensure uniqueness if a profile with the same id already exists.
+    while get_profile(con, pid) is not None:
+        pid = f"{slugify(name)}-{uuid.uuid4().hex[:4]}"
+    profile = Profile(
+        profile_id=pid,
+        name=name.strip(),
+        keywords=list(keywords or _DEFAULT_KEYWORDS),
+        locations=list(locations or _DEFAULT_LOCATIONS),
+        sites=list(sites or C.DEFAULT_SITES),
+    )
+    save_profile(con, profile)
+    return profile
+
+
 # --------------------------------------------------------------------------- #
-# DB readers
+# DB readers (profile-aware)
 # --------------------------------------------------------------------------- #
 _MART_TABLES: Final[frozenset[str]] = frozenset(
     {
@@ -125,23 +241,31 @@ _MART_TABLES: Final[frozenset[str]] = frozenset(
 )
 
 
-def load_mart(con: duckdb.DuckDBPyConnection, name: str) -> pd.DataFrame:
-    """Load a mart table as a DataFrame. Validates the name against an allow-list."""
+def load_mart(
+    con: duckdb.DuckDBPyConnection,
+    name: str,
+    *,
+    profile_id: str | None = None,
+) -> pd.DataFrame:
+    """Load a mart table as a DataFrame. Optional profile filter."""
     if name not in _MART_TABLES:
         raise ValueError(f"Unknown mart {name!r}. Allowed: {sorted(_MART_TABLES)}")
-    return con.execute(f"SELECT * FROM {name}").df()
+    if profile_id is None:
+        return con.execute(f"SELECT * FROM {name}").df()
+    return con.execute(
+        f"SELECT * FROM {name} WHERE profile_id = ?",
+        [profile_id],
+    ).df()
 
 
 def load_fact_with_dims(
     con: duckdb.DuckDBPyConnection,
     *,
     keyword: str | None = None,
+    profile_id: str | None = None,
     limit: int = DEFAULT_FACT_LIMIT,
 ) -> pd.DataFrame:
-    """Join fact_job_offers with dim_location, dim_salary, int_enriched_job_info.
-
-    Returns a DataFrame suitable for direct rendering in st.dataframe.
-    """
+    """Join fact_job_offers with dim_location, dim_salary, int_enriched_job_info."""
     if limit <= 0:
         raise ValueError("limit must be positive")
     limit = min(limit, MAX_FACT_LIMIT)
@@ -150,6 +274,7 @@ def load_fact_with_dims(
         SELECT
             f.job_id,
             f.run_id,
+            f.profile_id,
             f.site,
             f.search_keyword,
             f.company,
@@ -166,6 +291,7 @@ def load_fact_with_dims(
             s.period     AS salary_period,
             e.tech_skills,
             e.soft_skills,
+            e.domain_skills,
             f.scraped_at,
             f.enriched_at
         FROM fact_job_offers f
@@ -174,35 +300,62 @@ def load_fact_with_dims(
         LEFT JOIN int_enriched_job_info e ON e.job_id       = f.job_id
     """
     params: list[Any] = []
+    clauses: list[str] = []
     if keyword:
-        sql += " WHERE f.search_keyword = ?"
+        clauses.append("f.search_keyword = ?")
         params.append(keyword)
+    if profile_id:
+        clauses.append("f.profile_id = ?")
+        params.append(profile_id)
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
     sql += " ORDER BY f.date_posted DESC NULLS LAST, f.scraped_at DESC LIMIT ?"
     params.append(limit)
 
     return con.execute(sql, params).df()
 
 
-def count_jobs(con: duckdb.DuckDBPyConnection) -> int:
-    """Quick count of rows in fact_job_offers (0 if table missing/empty)."""
+def count_jobs(con: duckdb.DuckDBPyConnection, *, profile_id: str | None = None) -> int:
+    """Rows in fact_job_offers (optionally filtered by profile)."""
     try:
-        result = con.execute("SELECT COUNT(*) FROM fact_job_offers").fetchone()
+        if profile_id is None:
+            result = con.execute("SELECT COUNT(*) FROM fact_job_offers").fetchone()
+        else:
+            result = con.execute(
+                "SELECT COUNT(*) FROM fact_job_offers WHERE profile_id = ?",
+                [profile_id],
+            ).fetchone()
     except duckdb.Error:
         return 0
     return int(result[0]) if result else 0
 
 
-def latest_run_status(con: duckdb.DuckDBPyConnection) -> dict[str, Any] | None:
-    """Return {run_id, started_at, finished_at, status} for the most recent run."""
+def latest_run_status(
+    con: duckdb.DuckDBPyConnection, *, profile_id: str | None = None
+) -> dict[str, Any] | None:
+    """Return {run_id, started_at, finished_at, status, profile_id} for the
+    most recent run (optionally filtered)."""
     try:
-        row = con.execute(
-            """
-            SELECT run_id, started_at, finished_at, status
-            FROM pipeline_runs
-            ORDER BY started_at DESC
-            LIMIT 1
-            """
-        ).fetchone()
+        if profile_id is None:
+            row = con.execute(
+                """
+                SELECT run_id, started_at, finished_at, status, profile_id
+                FROM pipeline_runs
+                ORDER BY started_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        else:
+            row = con.execute(
+                """
+                SELECT run_id, started_at, finished_at, status, profile_id
+                FROM pipeline_runs
+                WHERE profile_id = ?
+                ORDER BY started_at DESC
+                LIMIT 1
+                """,
+                [profile_id],
+            ).fetchone()
     except duckdb.Error:
         return None
     if row is None:
@@ -212,6 +365,7 @@ def latest_run_status(con: duckdb.DuckDBPyConnection) -> dict[str, Any] | None:
         "started_at": row[1],
         "finished_at": row[2],
         "status": row[3],
+        "profile_id": row[4],
     }
 
 
@@ -220,11 +374,7 @@ def latest_run_status(con: duckdb.DuckDBPyConnection) -> dict[str, Any] | None:
 # --------------------------------------------------------------------------- #
 @contextmanager
 def read_only_connection() -> Iterator[duckdb.DuckDBPyConnection]:
-    """Open the shared DuckDB read-only.
-
-    If the DB file doesn't exist yet, init_schema() first (creates it
-    read-write) and then reopen read-only.
-    """
+    """Open the shared DuckDB read-only. Initializes schema on first open."""
     from job_research.config import get_settings
 
     settings = get_settings()
@@ -243,28 +393,32 @@ try:
     import streamlit as st
 
     @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
-    def cached_mart(name: str) -> pd.DataFrame:
-        """Cached version of load_mart for use inside Streamlit pages."""
+    def cached_mart(name: str, profile_id: str | None = None) -> pd.DataFrame:
         with read_only_connection() as con:
-            return load_mart(con, name)
+            return load_mart(con, name, profile_id=profile_id)
 
     @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
     def cached_fact_with_dims(
-        keyword: str | None = None, limit: int = DEFAULT_FACT_LIMIT
+        keyword: str | None = None,
+        profile_id: str | None = None,
+        limit: int = DEFAULT_FACT_LIMIT,
     ) -> pd.DataFrame:
-        """Cached version of load_fact_with_dims."""
         with read_only_connection() as con:
-            return load_fact_with_dims(con, keyword=keyword, limit=limit)
+            return load_fact_with_dims(
+                con, keyword=keyword, profile_id=profile_id, limit=limit
+            )
 
     @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
-    def cached_count_jobs() -> int:
+    def cached_count_jobs(profile_id: str | None = None) -> int:
         with read_only_connection() as con:
-            return count_jobs(con)
+            return count_jobs(con, profile_id=profile_id)
 
     @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
-    def cached_latest_run_status() -> dict[str, Any] | None:
+    def cached_latest_run_status(
+        profile_id: str | None = None,
+    ) -> dict[str, Any] | None:
         with read_only_connection() as con:
-            return latest_run_status(con)
+            return latest_run_status(con, profile_id=profile_id)
 
 except ImportError:  # pragma: no cover — tests don't need this branch
     pass

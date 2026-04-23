@@ -19,6 +19,8 @@ EXPECTED_TABLES = {
     "mart_salary_by_keyword",
     "mart_work_mode_distribution",
     "pipeline_runs",
+    "user_search_config",
+    "user_search_profiles",
 }
 
 

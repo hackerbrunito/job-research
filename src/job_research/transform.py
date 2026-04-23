@@ -116,6 +116,7 @@ def _load_enriched(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
         SELECT
             s.id              AS job_id,
             s.run_id,
+            s.profile_id,
             s.scraped_at,
             s.site,
             s.search_keyword,
@@ -274,10 +275,17 @@ def _build_fact(
             _norm(r["salary_currency"]),
             _norm(r["salary_period"]),
         )
+        profile_id_raw = r.get("profile_id") if hasattr(r, "get") else r["profile_id"]
+        profile_id = (
+            None
+            if profile_id_raw is None or pd.isna(profile_id_raw)
+            else str(profile_id_raw)
+        )
         rows.append(
             {
                 "job_id": r["job_id"],
                 "run_id": r["run_id"],
+                "profile_id": profile_id,
                 "scraped_at": r["scraped_at"],
                 "enriched_at": r["enriched_at"],
                 "site": r["site"],
@@ -298,6 +306,7 @@ def _build_fact(
         columns=[
             "job_id",
             "run_id",
+            "profile_id",
             "scraped_at",
             "enriched_at",
             "site",

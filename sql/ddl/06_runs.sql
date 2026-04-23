@@ -4,6 +4,7 @@
 -- =========================================================================
 CREATE TABLE IF NOT EXISTS pipeline_runs (
     run_id        VARCHAR PRIMARY KEY,
+    profile_id    VARCHAR,                -- which saved search was run (NULL for ad-hoc runs)
     started_at    TIMESTAMP NOT NULL,
     finished_at   TIMESTAMP,
     status        VARCHAR NOT NULL,       -- running | success | failed
@@ -17,3 +18,7 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
 
 CREATE INDEX IF NOT EXISTS idx_runs_started ON pipeline_runs(started_at);
 CREATE INDEX IF NOT EXISTS idx_runs_status  ON pipeline_runs(status);
+
+-- Idempotent migration.
+ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS profile_id VARCHAR;
+CREATE INDEX IF NOT EXISTS idx_runs_profile ON pipeline_runs(profile_id);

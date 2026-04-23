@@ -76,10 +76,15 @@ class PipelineSummary:
     log_prints=False,
     cache_policy=NO_CACHE,
 )
-def scrape_task(run_id: str, requests: list[ScrapeRequest]) -> list[ScrapeResult]:
+def scrape_task(
+    run_id: str,
+    requests: list[ScrapeRequest],
+    *,
+    profile_id: str | None = None,
+) -> list[ScrapeResult]:
     logger = get_run_logger()
     logger.info(f"scrape.start run_id={run_id} requests={len(requests)}")
-    results = scrape_to_staging(run_id=run_id, requests=requests)
+    results = scrape_to_staging(run_id=run_id, requests=requests, profile_id=profile_id)
     logger.info(
         f"scrape.end run_id={run_id} "
         f"rows={sum(r.rows for r in results)} "
@@ -149,6 +154,7 @@ def job_research_pipeline(
     *,
     enrich_limit: int | None = None,
     settings: Settings | None = None,
+    profile_id: str | None = None,
 ) -> PipelineSummary:
     """End-to-end pipeline. One run = one row in `pipeline_runs`.
 
@@ -186,10 +192,11 @@ def job_research_pipeline(
             keywords=keywords,
             locations=[loc for loc in locs if loc is not None],
             sites=list(site_tuple),
+            profile_id=profile_id,
         )
 
     try:
-        summary.scrape_results = scrape_task(run_id, requests)
+        summary.scrape_results = scrape_task(run_id, requests, profile_id=profile_id)
         summary.enrichment = enrich_task(run_id, enrich_limit, settings=settings)
         summary.transform = transform_task()
         summary.status = "success"
@@ -256,6 +263,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Cap on rows to enrich (for dev/debug).",
     )
     parser.add_argument(
+        "--profile-id",
+        default=None,
+        help="Saved search profile id; tags scraped rows for dashboard filtering.",
+    )
+    parser.add_argument(
         "--log-level",
         default=None,
         help="Override log level (DEBUG/INFO/WARNING/ERROR).",
@@ -273,6 +285,7 @@ def main(argv: list[str] | None = None) -> int:
         locations=args.location,
         sites=args.site,
         enrich_limit=args.enrich_limit,
+        profile_id=args.profile_id,
     )
     print(
         f"[{summary.status}] run_id={summary.run_id} "

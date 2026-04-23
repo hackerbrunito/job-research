@@ -28,7 +28,9 @@ def _no_op_db(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     config.get_settings.cache_clear()
 
 
-def _fake_scrape(run_id: str, requests: list[ScrapeRequest]) -> list[ScrapeResult]:
+def _fake_scrape(
+    run_id: str, requests: list[ScrapeRequest], **_: Any
+) -> list[ScrapeResult]:
     return [
         ScrapeResult(
             request=r,
@@ -109,7 +111,9 @@ def test_pipeline_builds_one_request_per_keyword_location(
 
     captured: dict[str, Any] = {}
 
-    def _capture(run_id: str, requests: list[ScrapeRequest]) -> list[ScrapeResult]:
+    def _capture(
+        run_id: str, requests: list[ScrapeRequest], **_: Any
+    ) -> list[ScrapeResult]:
         captured["requests"] = requests
         return _fake_scrape(run_id, requests)
 
