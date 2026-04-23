@@ -36,3 +36,9 @@ ALTER TABLE judged_job_offers ADD COLUMN IF NOT EXISTS judged_at         TIMESTA
 
 -- Idempotent migration: add bi-encoder score column.
 ALTER TABLE judged_job_offers ADD COLUMN IF NOT EXISTS biencoder_score DOUBLE;
+
+-- Idempotent migration: add cross-encoder reranker score column.
+ALTER TABLE judged_job_offers ADD COLUMN IF NOT EXISTS crossencoder_score DOUBLE;
+
+-- Idempotent migration: add SetFit few-shot classifier score column.
+ALTER TABLE judged_job_offers ADD COLUMN IF NOT EXISTS setfit_score DOUBLE;

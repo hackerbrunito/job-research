@@ -35,6 +35,8 @@ dependencies = [
     # Semantic similarity (bi-encoder)
     "sentence-transformers>=3.0,<4.0",
     "torch>=2.0",
+    # SetFit few-shot classifier
+    "setfit>=0.9",
 ]
 
 [dependency-groups]
@@ -99,3 +101,6 @@ reportMissingTypeStubs = false
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-ra --strict-markers --tb=short"
+markers = [
+    "slow: marks tests as slow (model download + training, ~30-60s on CPU)",
+]

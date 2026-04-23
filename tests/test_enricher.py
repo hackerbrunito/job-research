@@ -11,7 +11,7 @@ from pydantic import SecretStr, ValidationError
 
 from job_research import constants as C
 from job_research.config import LLMConfig, Settings
-from job_research.enricher import EnrichmentSummary, enrich_staging
+from job_research.enricher import EnrichmentSummary, _compute_ensemble, enrich_staging
 from job_research.llm_providers import build_provider
 from job_research.schemas import (
     JobEnrichment,
@@ -32,9 +32,19 @@ from job_research.schemas import (
 # --------------------------------------------------------------------------- #
 @pytest.fixture(autouse=True)
 def _bypass_scorer(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make the bi-encoder a no-op (score=1.0) for all tests in this module."""
+    """Make all scorers no-ops for all tests in this module.
+
+    Semantic scorer, cross-encoder, and SetFit are patched to always pass so
+    that enricher tests focus on routing / verdict logic, not model quality.
+    """
     monkeypatch.setattr("job_research.enricher._score_relevance", lambda **_: 1.0)
+    monkeypatch.setattr("job_research.enricher._cross_encode", lambda **_: 1.0)
+    monkeypatch.setattr(
+        "job_research.enricher._setfit_predict", lambda _pid, texts: [1.0] * len(texts)
+    )
     monkeypatch.setattr("job_research.enricher._SEMANTIC_SCORE_THRESHOLD", 0.0)
+    monkeypatch.setattr("job_research.enricher.CROSS_ENCODER_THRESHOLD", -999.0)
+    monkeypatch.setattr("job_research.enricher.SETFIT_SCORE_THRESHOLD", 0.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -550,3 +560,38 @@ class TestBuildProvider:
         settings = self._settings()  # no openai key
         provider = build_provider(cfg, settings)
         assert provider.provider_name == C.PROVIDER_OPENAI_COMPATIBLE
+
+
+# --------------------------------------------------------------------------- #
+# _compute_ensemble unit tests
+# --------------------------------------------------------------------------- #
+class TestComputeEnsemble:
+    def test_compute_ensemble_biencoder_rejects(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bi-encoder score below threshold must veto even when rule+LLM say accept."""
+        monkeypatch.setattr("job_research.enricher._SEMANTIC_SCORE_THRESHOLD", 0.35)
+        result = _compute_ensemble(
+            rule_verdict="accept",
+            llm_is_relevant=True,
+            biencoder_score=0.1,
+            crossencoder_score=1.0,
+            setfit_score=1.0,
+        )
+        assert result == "reject"
+
+    def test_compute_ensemble_all_agree_accepts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """All scores above thresholds and LLM says relevant → accept."""
+        monkeypatch.setattr("job_research.enricher._SEMANTIC_SCORE_THRESHOLD", 0.35)
+        monkeypatch.setattr("job_research.enricher.CROSS_ENCODER_THRESHOLD", 0.0)
+        monkeypatch.setattr("job_research.enricher.SETFIT_SCORE_THRESHOLD", 0.5)
+        result = _compute_ensemble(
+            rule_verdict="accept",
+            llm_is_relevant=True,
+            biencoder_score=0.8,
+            crossencoder_score=0.9,
+            setfit_score=0.9,
+        )
+        assert result == "accept"

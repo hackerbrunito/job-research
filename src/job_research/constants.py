@@ -104,3 +104,15 @@ DEFAULT_DASHBOARD_PORT: Final[int] = 8501
 # Calibrated for short-text job-title queries (e.g. "Store Development Manager").
 # Adjust after empirical tuning against a labelled set.
 SEMANTIC_SCORE_THRESHOLD: Final[float] = 0.35
+
+# ---- Cross-encoder reranker -----------------------------------------------
+# Neutral logit threshold for ms-marco-MiniLM-L-6-v2. The model returns raw
+# logits (not probabilities); scores above 0.0 indicate relevance. Callers
+# may choose a stricter threshold after empirical tuning.
+CROSS_ENCODER_THRESHOLD: Final[float] = 0.0
+
+# ---- SetFit few-shot classifier -------------------------------------------
+# Probability threshold above which a SetFit score is considered 'relevant'.
+SETFIT_SCORE_THRESHOLD: Final[float] = 0.5
+# Minimum labelled examples per class required before training is attempted.
+SETFIT_MIN_EXAMPLES_PER_CLASS: Final[int] = 4

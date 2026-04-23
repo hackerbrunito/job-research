@@ -40,6 +40,38 @@ except ImportError:
 
     _SEMANTIC_SCORE_THRESHOLD = 0.0
 
+# Graceful degradation: cross-encoder reranker (heavier model, runs after bi-encoder).
+try:
+    from job_research.cross_encoder_scorer import (
+        CROSS_ENCODER_THRESHOLD,
+    )
+    from job_research.cross_encoder_scorer import (
+        cross_encode as _cross_encode,
+    )
+
+    _CROSS_ENCODER_AVAILABLE = True
+except ImportError:
+    _CROSS_ENCODER_AVAILABLE = False
+
+    def _cross_encode(**_: object) -> float:  # type: ignore[misc]
+        return 1.0
+
+    CROSS_ENCODER_THRESHOLD = 0.0
+
+# Graceful degradation: SetFit few-shot classifier (requires profile training data).
+try:
+    from job_research.constants import SETFIT_SCORE_THRESHOLD
+    from job_research.setfit_classifier import predict as _setfit_predict
+
+    _SETFIT_AVAILABLE = True
+except ImportError:
+    _SETFIT_AVAILABLE = False
+
+    def _setfit_predict(profile_id: object, texts: list[str]) -> list[float]:  # type: ignore[misc]
+        return [1.0] * len(texts)
+
+    SETFIT_SCORE_THRESHOLD = 0.0
+
 log = get_logger(__name__)
 
 
@@ -120,12 +152,22 @@ def _compute_ensemble(
     rule_verdict: str | None,
     llm_is_relevant: bool,
     biencoder_score: float = 1.0,
+    crossencoder_score: float = 0.0,
+    setfit_score: float = 1.0,
 ) -> str:
-    """Derive ensemble_verdict from rule filter, bi-encoder score, and LLM signal."""
+    """Derive ensemble_verdict from rule filter, all scorer signals, and LLM judge.
+
+    Layered rejection: any single classifier can veto a row.
+    A row must pass ALL active classifiers AND the LLM judge to be accepted.
+    """
     if rule_verdict == "reject":
         return "reject"
     # Bi-encoder pre-reject: score too low even before consulting the LLM.
     if biencoder_score < _SEMANTIC_SCORE_THRESHOLD:
+        return "reject"
+    if _CROSS_ENCODER_AVAILABLE and crossencoder_score < CROSS_ENCODER_THRESHOLD:
+        return "reject"
+    if _SETFIT_AVAILABLE and setfit_score < SETFIT_SCORE_THRESHOLD:
         return "reject"
     if llm_is_relevant:
         return "accept"
@@ -181,6 +223,27 @@ def enrich_staging(
             model=provider.model_name,
         )
 
+        # SetFit: train (or skip if too few labels) for the active profile.
+        # We resolve profile_id from the first pending row if not given directly.
+        _active_profile_id: str | None = None
+        if pending:
+            _active_profile_id = pending[0][4]  # profile_id column index
+        if _SETFIT_AVAILABLE and _active_profile_id:
+            from job_research.app.common import list_title_labels
+            from job_research.setfit_classifier import train_for_profile
+
+            try:
+                with connect() as label_con:
+                    labels = list_title_labels(label_con, _active_profile_id)
+                if labels:
+                    trained = train_for_profile(_active_profile_id, labels)
+                    if trained:
+                        log.info(
+                            "enricher.setfit.trained", profile_id=_active_profile_id
+                        )
+            except Exception as exc:
+                log.warning("enricher.setfit.train_failed", error=str(exc))
+
         attempted = 0
         succeeded = 0
         failed = 0
@@ -197,6 +260,20 @@ def enrich_staging(
                 job_description=description,
             )
 
+            # --- Cross-encoder + SetFit (only when bi-encoder passes) ---------
+            crossencoder_score: float = 0.0
+            setfit_score: float = 1.0
+
+            if biencoder_score >= _SEMANTIC_SCORE_THRESHOLD:
+                crossencoder_score = _cross_encode(
+                    search_keyword=search_keyword or "",
+                    job_title=title or "",
+                    job_description=description,
+                )
+                if _SETFIT_AVAILABLE and profile_id:
+                    scores = _setfit_predict(profile_id, [title or ""])
+                    setfit_score = scores[0]
+
             if biencoder_score < _SEMANTIC_SCORE_THRESHOLD:
                 log.info(
                     "enrich.biencoder_reject",
@@ -209,12 +286,15 @@ def enrich_staging(
                     INSERT INTO judged_job_offers
                         (job_id, profile_id, search_keyword, job_title,
                          rule_verdict, ensemble_verdict, biencoder_score,
+                         crossencoder_score, setfit_score,
                          judged_at)
-                    VALUES (?, ?, ?, ?, ?, 'reject', ?, CURRENT_TIMESTAMP)
+                    VALUES (?, ?, ?, ?, ?, 'reject', ?, ?, ?, CURRENT_TIMESTAMP)
                     ON CONFLICT (job_id) DO UPDATE SET
-                        biencoder_score  = excluded.biencoder_score,
-                        ensemble_verdict = excluded.ensemble_verdict,
-                        judged_at        = excluded.judged_at
+                        biencoder_score    = excluded.biencoder_score,
+                        crossencoder_score = excluded.crossencoder_score,
+                        setfit_score       = excluded.setfit_score,
+                        ensemble_verdict   = excluded.ensemble_verdict,
+                        judged_at          = excluded.judged_at
                     """,
                     [
                         job_id,
@@ -223,6 +303,8 @@ def enrich_staging(
                         title,
                         rule_verdict or "accept",
                         biencoder_score,
+                        crossencoder_score,
+                        setfit_score,
                     ],
                 )
                 # Count as succeeded (scored and written); no LLM call needed.
@@ -265,7 +347,11 @@ def enrich_staging(
 
             # Write LLM verdict to judged_job_offers (upsert).
             ensemble = _compute_ensemble(
-                rule_verdict, enrichment.is_relevant, biencoder_score
+                rule_verdict,
+                enrichment.is_relevant,
+                biencoder_score,
+                crossencoder_score,
+                setfit_score,
             )
             conn.execute(
                 """
@@ -273,15 +359,18 @@ def enrich_staging(
                     (job_id, profile_id, search_keyword, job_title,
                      rule_verdict, llm_is_relevant, llm_confidence,
                      llm_reason, ensemble_verdict, biencoder_score,
+                     crossencoder_score, setfit_score,
                      judged_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT (job_id) DO UPDATE SET
-                    llm_is_relevant  = excluded.llm_is_relevant,
-                    llm_confidence   = excluded.llm_confidence,
-                    llm_reason       = excluded.llm_reason,
-                    ensemble_verdict = excluded.ensemble_verdict,
-                    biencoder_score  = excluded.biencoder_score,
-                    judged_at        = excluded.judged_at
+                    llm_is_relevant    = excluded.llm_is_relevant,
+                    llm_confidence     = excluded.llm_confidence,
+                    llm_reason         = excluded.llm_reason,
+                    ensemble_verdict   = excluded.ensemble_verdict,
+                    biencoder_score    = excluded.biencoder_score,
+                    crossencoder_score = excluded.crossencoder_score,
+                    setfit_score       = excluded.setfit_score,
+                    judged_at          = excluded.judged_at
                 """,
                 [
                     job_id,
@@ -294,6 +383,8 @@ def enrich_staging(
                     enrichment.relevance_reason,
                     ensemble,
                     biencoder_score,
+                    crossencoder_score,
+                    setfit_score,
                 ],
             )
             succeeded += 1
