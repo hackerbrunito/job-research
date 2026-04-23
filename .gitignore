@@ -1,0 +1,39 @@
+# Claude Code local files (never commit)
+.claude/
+CLAUDE.md
+HANDOFF.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.python-version
+
+# Env & secrets
+.env
+.env.local
+*.key
+*.pem
+
+# Data
+data/
+*.duckdb
+*.duckdb.wal
+
+# Logs
+*.log
+logs/
+
+# Testing / tooling
+.pytest_cache/
+.ruff_cache/
+.pyright/
+htmlcov/
+.coverage
+coverage.xml
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
