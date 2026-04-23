@@ -94,6 +94,24 @@ def load_sql(name: str, *, kind: str = "dml") -> str:
 # --------------------------------------------------------------------------- #
 # Insert helpers
 # --------------------------------------------------------------------------- #
+# Explicit allow-list of tables that insert_dataframe may write to. The table
+# name is f-stringed into SQL (DuckDB doesn't parameterize identifiers), so the
+# invariant "caller passes a hardcoded internal name" must be enforced, not
+# just documented.
+_INSERTABLE_TABLES: frozenset[str] = frozenset(
+    {
+        "staging_job_offers",
+        "int_enriched_job_info",
+        "dim_location",
+        "dim_salary",
+        "dim_skill",
+        "fact_job_offers",
+        "job_skill_bridge",
+        "user_search_config",
+    }
+)
+
+
 def insert_dataframe(
     con: duckdb.DuckDBPyConnection,
     df: pd.DataFrame,
@@ -102,12 +120,13 @@ def insert_dataframe(
     by_name: bool = True,
 ) -> int:
     """Insert a DataFrame into an existing table. Returns row count."""
+    if table not in _INSERTABLE_TABLES:
+        raise ValueError(f"insert_dataframe: table {table!r} is not in the allow-list")
     if df.empty:
         return 0
     con.register("_incoming_df", df)
     try:
         clause = "BY NAME " if by_name else ""
-        # Table name is caller-supplied from internal code only, never user input.
         con.execute(f"INSERT INTO {table} {clause}SELECT * FROM _incoming_df")  # noqa: S608
     finally:
         con.unregister("_incoming_df")

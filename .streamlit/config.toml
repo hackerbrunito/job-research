@@ -1,0 +1,18 @@
+# Bind to loopback so the dashboard isn't reachable from the LAN. Anyone who
+# could hit :8501 can click "Run pipeline" and spend LLM credits — this is a
+# single-user desktop tool with no auth model.
+[server]
+address = "127.0.0.1"
+headless = true
+enableCORS = false
+enableXsrfProtection = true
+
+# Don't leak stack traces into the browser — they may contain request bodies
+# or SDK-wrapped error strings that include the API key on malformed calls.
+[client]
+showErrorDetails = false
+toolbarMode = "minimal"
+
+# No usage telemetry.
+[browser]
+gatherUsageStats = false

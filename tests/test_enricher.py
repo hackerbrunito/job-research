@@ -260,6 +260,41 @@ class TestEnrichStaging:
         }
         assert stored_ids == {"j1", "j3"}
 
+    def test_enricher_counts_validation_error_as_failed(
+        self, tmp_duckdb: duckdb.DuckDBPyConnection
+    ) -> None:
+        """ValidationError from provider is caught and counted as failed."""
+        _insert_staging(tmp_duckdb, job_id="j1", title="A", description="a")
+        _insert_staging(tmp_duckdb, job_id="j2", title="B", description="b")
+        _insert_staging(tmp_duckdb, job_id="j3", title="C", description="c")
+
+        # Trigger a real ValidationError by attempting to validate a bad payload.
+        try:
+            JobEnrichment.model_validate({"tech_skills": "not-a-list"})
+        except ValidationError as exc:
+            validation_error = exc
+        else:  # pragma: no cover — sanity
+            raise AssertionError("expected ValidationError")
+
+        provider = _FakeProvider(
+            {
+                "A": _make_enrichment(),
+                "B": validation_error,
+                "C": _make_enrichment(),
+            }
+        )
+
+        summary = enrich_staging(provider=provider, con=tmp_duckdb)
+        assert summary == EnrichmentSummary(attempted=3, succeeded=2, failed=1)
+
+        stored_ids = {
+            r[0]
+            for r in tmp_duckdb.execute(
+                "SELECT job_id FROM int_enriched_job_info"
+            ).fetchall()
+        }
+        assert stored_ids == {"j1", "j3"}
+
     def test_limit_caps_attempted_rows(
         self, tmp_duckdb: duckdb.DuckDBPyConnection
     ) -> None:

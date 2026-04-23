@@ -220,6 +220,50 @@ def test_dedup_same_job_url_in_same_site(
     assert got[0] == 1
 
 
+def test_scrape_retries_on_transient_error(
+    tmp_duckdb: duckdb.DuckDBPyConnection, mocker: MockerFixture
+) -> None:
+    """Tenacity retries a ConnectionError, then succeeds on second attempt."""
+    # Avoid actual backoff delay.
+    mocker.patch("tenacity.nap.time.sleep", return_value=None)
+
+    empty_df = _make_df([])
+    mock_scrape = mocker.patch.object(
+        scraper,
+        "scrape_jobs",
+        side_effect=[ConnectionError("boom"), empty_df],
+    )
+
+    req = ScrapeRequest(keyword="python", sites=(SITE_INDEED,))
+    results = scrape_to_staging("run-retry", [req], con=tmp_duckdb)
+
+    # Two attempts: first raises, second succeeds with empty df.
+    assert mock_scrape.call_count == 2
+    assert results[0].per_site_counts[SITE_INDEED] == 0
+    # Empty string (not an error) because the retry succeeded.
+    assert results[0].per_site_errors[SITE_INDEED] == ""
+
+
+def test_scrape_does_not_retry_on_non_transient(
+    tmp_duckdb: duckdb.DuckDBPyConnection, mocker: MockerFixture
+) -> None:
+    """ValueError is not in _TRANSIENT_ERRORS -> no retry, captured per-site."""
+    mocker.patch("tenacity.nap.time.sleep", return_value=None)
+
+    mock_scrape = mocker.patch.object(
+        scraper,
+        "scrape_jobs",
+        side_effect=ValueError("bad input"),
+    )
+
+    req = ScrapeRequest(keyword="python", sites=(SITE_INDEED,))
+    results = scrape_to_staging("run-no-retry", [req], con=tmp_duckdb)
+
+    assert mock_scrape.call_count == 1
+    assert "ValueError" in results[0].per_site_errors[SITE_INDEED]
+    assert results[0].per_site_counts[SITE_INDEED] == 0
+
+
 def test_missing_job_url_rows_filtered(
     tmp_duckdb: duckdb.DuckDBPyConnection, mocker: MockerFixture
 ) -> None:

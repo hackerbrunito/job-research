@@ -105,20 +105,26 @@ def _render_country_map(jobs_by_country: pd.DataFrame) -> None:
         .sum()
         .sort_values("job_count", ascending=False)
     )
+    # Marts store ISO 3166-1 alpha-2; Plotly ISO-3 choropleth needs alpha-3.
+    # Convert with pycountry (already a dep); rows that don't resolve are dropped.
+    import pycountry
+
+    def _alpha3(code: str | None) -> str | None:
+        if not code:
+            return None
+        try:
+            return pycountry.countries.get(alpha_2=code.upper()).alpha_3  # type: ignore[union-attr]
+        except (AttributeError, KeyError):
+            return None
+
+    agg = agg.assign(_iso3=agg["country_code"].map(_alpha3)).dropna(subset=["_iso3"])
+    if agg.empty:
+        st.caption("No country codes resolved to ISO alpha-3 yet.")
+        return
     fig = px.choropleth(
         agg,
-        locations="country_code",
-        locationmode="ISO-3",  # Plotly supports alpha-2 via a conversion below
-        color="job_count",
-        hover_name="country",
-        color_continuous_scale="Blues",
-    )
-    # DuckDB marts store alpha-2; choropleth wants alpha-3. Use alpha-2 via
-    # geojson feature matching fallback with locationmode="country names".
-    fig = px.choropleth(
-        agg,
-        locations="country",
-        locationmode="country names",
+        locations="_iso3",
+        locationmode="ISO-3",
         color="job_count",
         hover_name="country",
         color_continuous_scale="Blues",

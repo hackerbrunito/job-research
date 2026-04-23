@@ -21,7 +21,7 @@ from prefect import flow, get_run_logger, task
 from prefect.cache_policies import NO_CACHE
 
 from job_research import constants as C
-from job_research.config import get_settings
+from job_research.config import Settings, get_settings
 from job_research.database import (
     connect,
     init_schema,
@@ -95,9 +95,13 @@ def scrape_task(run_id: str, requests: list[ScrapeRequest]) -> list[ScrapeResult
     log_prints=False,
     cache_policy=NO_CACHE,
 )
-def enrich_task(run_id: str, limit: int | None = None) -> EnrichmentSummary:
+def enrich_task(
+    run_id: str,
+    limit: int | None = None,
+    *,
+    settings: Settings,
+) -> EnrichmentSummary:
     logger = get_run_logger()
-    settings = get_settings()
     provider = build_provider(settings.llm, settings)
     logger.info(
         f"enrich.start run_id={run_id} "
@@ -144,6 +148,7 @@ def job_research_pipeline(
     sites: list[str] | None = None,
     *,
     enrich_limit: int | None = None,
+    settings: Settings | None = None,
 ) -> PipelineSummary:
     """End-to-end pipeline. One run = one row in `pipeline_runs`.
 
@@ -152,8 +157,13 @@ def job_research_pipeline(
         locations: Locations to restrict search to. If None, scrape without location.
         sites: Job boards to scrape. Defaults to DEFAULT_SITES.
         enrich_limit: Optional cap on rows to enrich (for dev/debug).
+        settings: Explicit Settings override (e.g. for a Streamlit session
+            that wants a non-default LLM provider without mutating process-
+            wide state). Defaults to `get_settings()`.
     """
     logger = get_run_logger()
+    if settings is None:
+        settings = get_settings()
     run_id = uuid.uuid4().hex
     started = datetime.now(UTC).replace(tzinfo=None)
 
@@ -180,7 +190,7 @@ def job_research_pipeline(
 
     try:
         summary.scrape_results = scrape_task(run_id, requests)
-        summary.enrichment = enrich_task(run_id, enrich_limit)
+        summary.enrichment = enrich_task(run_id, enrich_limit, settings=settings)
         summary.transform = transform_task()
         summary.status = "success"
     except Exception as exc:

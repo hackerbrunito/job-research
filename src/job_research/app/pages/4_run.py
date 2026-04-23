@@ -47,9 +47,11 @@ def _load_search_config() -> dict[str, Any] | None:
         from job_research.app import (
             common as app_common,  # type: ignore[import-not-found]
         )
-        from job_research.database import connect
 
-        with connect(read_only=True) as con:
+        # Use read_only_connection (auto-initializes schema on first open)
+        # instead of a bare read-only connect, which fails if the DB file
+        # doesn't exist yet.
+        with app_common.read_only_connection() as con:
             cfg = app_common.get_search_config(con)
         if cfg is None:
             return None
@@ -93,33 +95,24 @@ def _run_with_override(
     enrich_limit: int | None,
     override: dict[str, Any] | None,
 ) -> PipelineSummary:
-    """Invoke the flow, optionally swapping the cached Settings for the run."""
-    from job_research import config as cfg_module
+    """Invoke the flow, threading an optional per-session Settings override.
 
-    original = cfg_module.get_settings()
-    patched = _apply_llm_override(original, override) if override else None
-    _orig_fn = cfg_module.get_settings
-    try:
-        if patched is not None:
-            # Monkey-patch the module-level `get_settings` so pipeline tasks
-            # (which call `get_settings()` internally) see the overridden
-            # LLMConfig. Restored in `finally`.
-            def _patched_get_settings() -> Settings:
-                return patched
+    We pass the overridden Settings explicitly via the flow's `settings`
+    parameter rather than mutating `config.get_settings` — Streamlit runs
+    multiple sessions in a single process, and mutating process globals
+    would race across concurrent runs.
+    """
+    from job_research.config import get_settings
 
-            cfg_module.get_settings = _patched_get_settings  # type: ignore[assignment]
-
-        summary = job_research_pipeline(
-            keywords=keywords,
-            locations=locations,
-            sites=sites,
-            enrich_limit=enrich_limit,
-        )
-        return summary
-    finally:
-        if patched is not None:
-            cfg_module.get_settings = _orig_fn  # type: ignore[assignment]
-            cfg_module.get_settings.cache_clear()
+    base = get_settings()
+    effective = _apply_llm_override(base, override) if override else base
+    return job_research_pipeline(
+        keywords=keywords,
+        locations=locations,
+        sites=sites,
+        enrich_limit=enrich_limit,
+        settings=effective,
+    )
 
 
 # --------------------------------------------------------------------------- #

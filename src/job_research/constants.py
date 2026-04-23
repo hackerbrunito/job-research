@@ -22,7 +22,7 @@ SUPPORTED_PROVIDERS: Final[frozenset[str]] = frozenset(
 
 # ---- Default model IDs (April 2026, verified) ---------------------------
 DEFAULT_ANTHROPIC_MODEL: Final[str] = "claude-haiku-4-5-20251001"
-DEFAULT_OPENAI_MODEL: Final[str] = "gpt-5.4-nano"
+DEFAULT_OPENAI_MODEL: Final[str] = "gpt-4o-mini"
 DEFAULT_LOCAL_MODEL: Final[str] = "llama3:8b"
 
 # ---- JobSpy sites --------------------------------------------------------

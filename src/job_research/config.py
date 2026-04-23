@@ -10,8 +10,10 @@ Import pattern:
 
 from __future__ import annotations
 
+import ipaddress
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -44,6 +46,41 @@ class LLMConfig(BaseModel):
         if v not in C.SUPPORTED_PROVIDERS:
             raise ValueError(
                 f"provider must be one of {sorted(C.SUPPORTED_PROVIDERS)}, got {v!r}"
+            )
+        return v
+
+    @field_validator("base_url")
+    @classmethod
+    def _safe_base_url(cls, v: str | None) -> str | None:
+        """Reject URLs pointing at link-local / private / loopback-outside-
+        localhost hosts to stop SSRF into cloud metadata (169.254.169.254)
+        or internal services if the `.env` or UI override is attacker-
+        controlled. Plain `localhost` and `127.0.0.1` are allowed because
+        that is the intended Ollama / LM Studio case.
+        """
+        if v is None or not v.strip():
+            return None
+        v = v.strip()
+        parsed = urlparse(v)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError(f"base_url must be http(s), got {parsed.scheme!r}")
+        host = parsed.hostname
+        if not host:
+            raise ValueError("base_url must include a host")
+        if host.lower() in {"localhost"}:
+            return v
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            # hostname (DNS name) — accept; DNS-rebinding is a real concern but
+            # out of scope for a single-user desktop tool.
+            return v
+        if ip.is_loopback:
+            return v
+        if ip.is_private or ip.is_link_local or ip.is_multicast or ip.is_reserved:
+            raise ValueError(
+                f"base_url resolves to a non-routable address ({ip}); "
+                f"refusing to use it for LLM calls"
             )
         return v
 

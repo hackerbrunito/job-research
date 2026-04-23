@@ -326,9 +326,17 @@ def _upsert(
 
 
 def _refresh_marts(con: duckdb.DuckDBPyConnection) -> int:
+    """Refresh all marts atomically so the dashboard never observes an
+    empty mart between DELETE and INSERT."""
     count = 0
-    for name in _MART_FILES:
-        log.info("transform.mart.refresh", file=name)
-        con.execute(load_sql(name, kind="dml"))
-        count += 1
+    con.execute("BEGIN TRANSACTION")
+    try:
+        for name in _MART_FILES:
+            log.info("transform.mart.refresh", file=name)
+            con.execute(load_sql(name, kind="dml"))
+            count += 1
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
     return count

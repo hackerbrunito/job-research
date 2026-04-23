@@ -69,6 +69,17 @@ _TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (
     OSError,
 )
 
+# Exceptions that indicate bugs in our own code (not scraping failures).
+# These must propagate so they're visible during development instead of
+# being silently recorded as "site error".
+_PROGRAMMER_ERRORS: tuple[type[BaseException], ...] = (
+    AttributeError,
+    KeyError,
+    NameError,
+    TypeError,
+    ImportError,
+)
+
 
 @dataclass(frozen=True)
 class ScrapeRequest:
@@ -275,6 +286,9 @@ def _run(
                     location=req.location,
                     cfg=cfg,
                 )
+            except _PROGRAMMER_ERRORS:
+                # Bugs in our code, not scraping failures. Surface immediately.
+                raise
             except Exception as exc:
                 err = f"{type(exc).__name__}: {exc}"
                 log.error(

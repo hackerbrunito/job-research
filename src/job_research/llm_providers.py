@@ -73,12 +73,14 @@ class LLMProvider(Protocol):
 # --------------------------------------------------------------------------- #
 # Retry helpers
 # --------------------------------------------------------------------------- #
+# Only transient failures. APIStatusError is the base of all 4xx/5xx errors —
+# retrying it would retry 400/401/403/404, which are user-correctable and must
+# surface immediately. Retry only the explicitly transient subclasses.
 _ANTHROPIC_RETRY = (
     anthropic.RateLimitError,
     anthropic.APITimeoutError,
     anthropic.APIConnectionError,
     anthropic.InternalServerError,
-    anthropic.APIStatusError,
 )
 
 _OPENAI_RETRY = (
