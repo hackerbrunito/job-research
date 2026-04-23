@@ -4,7 +4,8 @@
 [server]
 address = "127.0.0.1"
 headless = true
-enableCORS = false
+# XSRF protection implies CORS restrictions; don't set enableCORS here — the
+# two flags conflict and Streamlit overrides enableCORS back to true anyway.
 enableXsrfProtection = true
 
 # Don't leak stack traces into the browser — they may contain request bodies
