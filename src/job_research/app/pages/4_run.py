@@ -1,13 +1,13 @@
 """Run Pipeline page.
 
-Shows the saved search config (from the Search page, persisted by Agent A's
-`app.common.get_search_config`) and triggers the Prefect flow on demand.
+Trigger the scrape -> enrich -> transform pipeline against one or more
+search profiles. Each selected profile becomes its own pipeline run.
 
-Design rules honoured:
+Design rules:
 - Pipeline runs ONLY on button click, never on page load.
 - The run button is disabled while a run is in progress.
-- After a successful or failed run, all `st.cache_data` is cleared so that
-  Results and History pages reflect the new state.
+- After all runs finish, `st.cache_data` is cleared so Results and History
+  reflect the new state.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from typing import Any, Final
 
 import streamlit as st
 
-from job_research import constants as C
+from job_research.app.common import Profile, list_profiles, read_only_connection
 from job_research.config import LLMConfig, Settings
 from job_research.logging_setup import get_logger
 from job_research.pipeline import PipelineSummary, job_research_pipeline
@@ -27,91 +27,57 @@ log = get_logger(__name__)
 # Page-local constants
 # --------------------------------------------------------------------------- #
 SESSION_KEY_RUNNING: Final[str] = "pipeline_running"
-SESSION_KEY_LAST_SUMMARY: Final[str] = "pipeline_last_summary"
+SESSION_KEY_LAST_SUMMARIES: Final[str] = "pipeline_last_summaries"
 SESSION_KEY_LLM_OVERRIDE: Final[str] = "llm_override"
+SESSION_KEY_ACTIVE_PROFILE: Final[str] = "active_profile_id"
 
 _ENRICH_LIMIT_MIN: Final[int] = 1
 _ENRICH_LIMIT_MAX: Final[int] = 10_000
 _ENRICH_LIMIT_DEFAULT: Final[int] = 50
+_RUN_ID_DISPLAY_CHARS: Final[int] = 8
 
 
 # --------------------------------------------------------------------------- #
-# Search config retrieval (with graceful fallback if Agent A's common.py
-# is not yet present)
+# Profile retrieval
 # --------------------------------------------------------------------------- #
-def _load_search_config() -> dict[str, Any] | None:
-    """Return persisted search config or None if nothing saved yet."""
+def _load_profiles() -> list[Profile]:
     try:
-        # Agent A owns app.common; import lazily so this page still loads
-        # even if the module doesn't exist yet.
-        from job_research.app import (
-            common as app_common,  # type: ignore[import-not-found]
-        )
-
-        # Use read_only_connection (auto-initializes schema on first open)
-        # instead of a bare read-only connect, which fails if the DB file
-        # doesn't exist yet.
-        with app_common.read_only_connection() as con:
-            cfg = app_common.get_search_config(con)
-        if cfg is None:
-            return None
-        # Be defensive: accept either a dict-like or an object with attrs.
-        if isinstance(cfg, dict):
-            return cfg
-        return {
-            "keywords": getattr(cfg, "keywords", []),
-            "locations": getattr(cfg, "locations", []),
-            "sites": getattr(cfg, "sites", list(C.DEFAULT_SITES)),
-        }
+        with read_only_connection() as con:
+            return list_profiles(con)
     except Exception as exc:
-        log.debug("run.search_config.unavailable", error=str(exc))
-        return None
+        log.debug("run.profiles.unavailable", error=str(exc))
+        return []
 
 
 # --------------------------------------------------------------------------- #
 # LLM override application
 # --------------------------------------------------------------------------- #
 def _apply_llm_override(settings: Settings, override: dict[str, Any]) -> Settings:
-    """Return a Settings copy with LLMConfig merged from the override.
-
-    We don't mutate the cached Settings instance. Instead, we build a new
-    LLMConfig and replace it on a shallow copy. `get_settings` everywhere
-    else still returns the cached original — the pipeline reads settings
-    via `get_settings()` inside tasks, so for the override to take effect
-    we monkey-patch the cache for the duration of the run.
-    """
+    """Return a Settings copy with LLMConfig merged from the override."""
     merged = settings.llm.model_dump()
     merged.update({k: v for k, v in override.items() if v is not None})
     new_llm = LLMConfig(**merged)
-    new_settings = settings.model_copy(update={"llm": new_llm})
-    return new_settings
+    return settings.model_copy(update={"llm": new_llm})
 
 
-def _run_with_override(
+def _run_one(
     *,
-    keywords: list[str],
-    locations: list[str] | None,
-    sites: list[str] | None,
+    profile: Profile,
     enrich_limit: int | None,
     override: dict[str, Any] | None,
 ) -> PipelineSummary:
-    """Invoke the flow, threading an optional per-session Settings override.
-
-    We pass the overridden Settings explicitly via the flow's `settings`
-    parameter rather than mutating `config.get_settings` — Streamlit runs
-    multiple sessions in a single process, and mutating process globals
-    would race across concurrent runs.
-    """
+    """Run the pipeline once for a single profile."""
     from job_research.config import get_settings
 
     base = get_settings()
     effective = _apply_llm_override(base, override) if override else base
     return job_research_pipeline(
-        keywords=keywords,
-        locations=locations,
-        sites=sites,
+        keywords=profile.keywords,
+        locations=profile.locations or None,
+        sites=profile.sites or None,
         enrich_limit=enrich_limit,
         settings=effective,
+        profile_id=profile.profile_id,
     )
 
 
@@ -122,47 +88,56 @@ def render() -> None:
     st.title("Run Pipeline")
     st.caption("Trigger the scrape -> enrich -> transform pipeline on demand.")
 
-    # ---- Search config summary ------------------------------------------- #
-    st.subheader("Search configuration")
-    cfg = _load_search_config()
-    if cfg is None:
-        st.warning(
-            "No saved search configuration found. Open the **Search** page to "
-            "set keywords, locations, and sites before running the pipeline."
-        )
+    profiles = _load_profiles()
+    if not profiles:
+        st.warning("No profiles found. Create one on the **Search config** page first.")
         return
 
-    keywords: list[str] = list(cfg.get("keywords") or [])
-    locations: list[str] = list(cfg.get("locations") or [])
-    sites: list[str] = list(cfg.get("sites") or list(C.DEFAULT_SITES))
+    # ---- Profile selection ---------------------------------------------- #
+    st.subheader("Profiles to run")
+    ids = [p.profile_id for p in profiles]
+    by_id: dict[str, Profile] = {p.profile_id: p for p in profiles}
 
-    if not keywords:
-        st.warning(
-            "Your saved search has no keywords. Add at least one keyword on "
-            "the **Search** page."
-        )
+    active = st.session_state.get(SESSION_KEY_ACTIVE_PROFILE)
+    default_selection = [active] if active in ids else [ids[0]]
+
+    picked_ids = st.multiselect(
+        "Profiles",
+        options=ids,
+        default=default_selection,
+        format_func=lambda pid: by_id[pid].name,
+        help="Each selected profile becomes its own pipeline run.",
+    )
+
+    if not picked_ids:
+        st.info("Select at least one profile to enable the Run button.")
         return
 
-    col_k, col_l, col_s = st.columns(3)
-    with col_k:
-        st.markdown("**Keywords**")
-        st.write(", ".join(keywords))
-    with col_l:
-        st.markdown("**Locations**")
-        st.write(", ".join(locations) if locations else "(none — global)")
-    with col_s:
-        st.markdown("**Sites**")
-        st.write(", ".join(sites))
+    # ---- Planned workload preview --------------------------------------- #
+    total_requests = 0
+    for pid in picked_ids:
+        p = by_id[pid]
+        total_requests += len(p.keywords) * max(len(p.locations), 1)
 
-    # keywords x max(1, locations) scrape requests
-    request_count = len(keywords) * max(1, len(locations))
-    st.info(f"Planned scrape requests: **{request_count}** (keywords x locations).")
+    st.info(
+        f"Planned: {len(picked_ids)} run(s), "
+        f"{total_requests} scrape request(s) in total."
+    )
+
+    with st.expander("Profile details", expanded=False):
+        for pid in picked_ids:
+            p = by_id[pid]
+            st.markdown(f"**{p.name}** (`{p.profile_id}`)")
+            st.write(
+                f"- keywords: {', '.join(p.keywords) or '(none)'}\n"
+                f"- locations: {', '.join(p.locations) or '(none - global)'}\n"
+                f"- sites: {', '.join(p.sites)}"
+            )
 
     st.divider()
 
-    # ---- Run options ----------------------------------------------------- #
+    # ---- Run options ---------------------------------------------------- #
     st.subheader("Run options")
-
     limit_enabled = st.checkbox(
         "Limit enrichment (for testing)",
         value=False,
@@ -188,7 +163,7 @@ def render() -> None:
             value=True,
             help=(
                 "Applies the temporary overrides set on the LLM page "
-                "(provider, model, etc.) for this run only."
+                "(provider, model, etc.) for these runs only."
             ),
         )
         if use_override:
@@ -201,66 +176,97 @@ def render() -> None:
 
     st.divider()
 
-    # ---- Trigger --------------------------------------------------------- #
+    # ---- Trigger -------------------------------------------------------- #
     running = bool(st.session_state.get(SESSION_KEY_RUNNING, False))
     run_clicked = st.button(
         "Run pipeline",
         type="primary",
         disabled=running,
-        use_container_width=False,
+        width="content",
     )
 
     if run_clicked:
         st.session_state[SESSION_KEY_RUNNING] = True
-        with st.status("Running pipeline...", expanded=True) as status:
-            try:
-                st.write(
-                    f"Scraping {len(keywords)} keyword(s) x "
-                    f"{max(1, len(locations))} location(s) on {len(sites)} site(s)..."
-                )
-                summary = _run_with_override(
-                    keywords=keywords,
-                    locations=locations or None,
-                    sites=sites or None,
-                    enrich_limit=enrich_limit,
-                    override=override if use_override else None,
-                )
-                st.write(
-                    f"Scraped {summary.scraped_count} rows, "
-                    f"enriched {summary.enriched_count} rows."
-                )
-                if summary.transform is not None:
-                    st.write(
-                        f"Transform: fact_rows={summary.transform.fact_rows}, "
-                        f"bridge_rows={summary.transform.bridge_rows}, "
-                        f"marts_refreshed={summary.transform.marts_refreshed}"
-                    )
-                status.update(label="Pipeline finished", state="complete")
-                st.session_state[SESSION_KEY_LAST_SUMMARY] = summary.to_dict()
-                st.success(
-                    f"Run `{summary.run_id[:8]}` completed with status "
-                    f"**{summary.status}**."
-                )
-                log.info(
-                    "pipeline.ui.success",
-                    run_id=summary.run_id,
-                    scraped=summary.scraped_count,
-                    enriched=summary.enriched_count,
-                )
-            except Exception as exc:
-                status.update(label="Pipeline failed", state="error")
-                st.error(f"{type(exc).__name__}: {exc}")
-                log.exception("pipeline.ui.failed")
-            finally:
-                st.session_state[SESSION_KEY_RUNNING] = False
-                # Invalidate any cached data so downstream pages refresh.
-                st.cache_data.clear()
+        summaries: list[dict[str, Any]] = []
+        container = st.container()
+        try:
+            for pid in picked_ids:
+                profile = by_id[pid]
+                with container.status(
+                    f"Running pipeline for '{profile.name}'...",
+                    expanded=True,
+                ) as status:
+                    try:
+                        st.write(
+                            f"Scraping {len(profile.keywords)} keyword(s) x "
+                            f"{max(1, len(profile.locations))} location(s) "
+                            f"on {len(profile.sites)} site(s)..."
+                        )
+                        summary = _run_one(
+                            profile=profile,
+                            enrich_limit=enrich_limit,
+                            override=override if use_override else None,
+                        )
+                        st.write(
+                            f"Scraped {summary.scraped_count} rows, "
+                            f"enriched {summary.enriched_count} rows."
+                        )
+                        if summary.transform is not None:
+                            st.write(
+                                "Transform: "
+                                f"fact_rows={summary.transform.fact_rows}, "
+                                f"bridge_rows={summary.transform.bridge_rows}, "
+                                "marts_refreshed="
+                                f"{summary.transform.marts_refreshed}"
+                            )
+                        status.update(
+                            label=f"'{profile.name}' finished",
+                            state="complete",
+                        )
+                        summaries.append(
+                            {
+                                "profile_id": profile.profile_id,
+                                "profile_name": profile.name,
+                                **summary.to_dict(),
+                            }
+                        )
+                        log.info(
+                            "pipeline.ui.success",
+                            run_id=summary.run_id,
+                            profile_id=profile.profile_id,
+                            scraped=summary.scraped_count,
+                            enriched=summary.enriched_count,
+                        )
+                    except Exception as exc:
+                        status.update(
+                            label=f"'{profile.name}' failed",
+                            state="error",
+                        )
+                        st.error(f"{type(exc).__name__}: {exc}")
+                        log.exception(
+                            "pipeline.ui.failed", profile_id=profile.profile_id
+                        )
+                        summaries.append(
+                            {
+                                "profile_id": profile.profile_id,
+                                "profile_name": profile.name,
+                                "status": "failed",
+                                "error": f"{type(exc).__name__}: {exc}",
+                            }
+                        )
+        finally:
+            st.session_state[SESSION_KEY_RUNNING] = False
+            st.session_state[SESSION_KEY_LAST_SUMMARIES] = summaries
+            st.cache_data.clear()
 
-    # ---- Last-run summary ------------------------------------------------ #
-    last = st.session_state.get(SESSION_KEY_LAST_SUMMARY)
+        ok = sum(1 for s in summaries if s.get("status") == "success")
+        st.success(f"Completed {ok}/{len(summaries)} run(s) successfully.")
+
+    # ---- Last-run summaries -------------------------------------------- #
+    last = st.session_state.get(SESSION_KEY_LAST_SUMMARIES)
     if last:
         st.divider()
-        st.subheader("Last run summary")
+        st.subheader("Last run summaries")
         st.json(last)
 
 

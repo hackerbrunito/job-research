@@ -12,8 +12,11 @@ from job_research import constants as C
 from job_research.app.common import (
     DEFAULT_FACT_LIMIT,
     MAX_FACT_LIMIT,
+    Profile,
     cached_fact_with_dims,
     cached_mart,
+    list_profiles,
+    read_only_connection,
 )
 from job_research.logging_setup import get_logger
 
@@ -22,7 +25,10 @@ log = get_logger(__name__)
 # ---- Page-local constants ------------------------------------------------
 TOP_TECH_SKILLS: Final[int] = 20
 TOP_SOFT_SKILLS: Final[int] = 10
+TOP_DOMAIN_SKILLS: Final[int] = 15
 TABLE_HEIGHT_PX: Final[int] = 520
+_ALL_PROFILES_OPTION: Final[str] = "__all__"
+_SESSION_KEY_ACTIVE_PROFILE: Final[str] = "active_profile_id"
 
 
 def _show_empty_state() -> None:
@@ -30,6 +36,34 @@ def _show_empty_state() -> None:
         "No jobs yet. Configure your search on the *Search config* page, "
         "then trigger a run from the *Run pipeline* page."
     )
+
+
+def _load_profiles_safely() -> list[Profile]:
+    try:
+        with read_only_connection() as con:
+            return list_profiles(con)
+    except Exception as exc:
+        log.warning("results.profiles.load_failed", error=str(exc))
+        return []
+
+
+def _render_profile_filter(profiles: list[Profile]) -> str | None:
+    """Selectbox at top of page. Returns the chosen profile_id or None for All."""
+    options = [_ALL_PROFILES_OPTION] + [p.profile_id for p in profiles]
+    labels: dict[str, str] = {_ALL_PROFILES_OPTION: "All profiles"}
+    for p in profiles:
+        labels[p.profile_id] = p.name
+
+    active = st.session_state.get(_SESSION_KEY_ACTIVE_PROFILE)
+    default_index = options.index(active) if active in options else 0
+    choice = st.selectbox(
+        "Profile",
+        options=options,
+        index=default_index,
+        format_func=lambda v: labels.get(v, v),
+        key="results_profile_select",
+    )
+    return None if choice == _ALL_PROFILES_OPTION else choice
 
 
 def _render_filters(fact_df: pd.DataFrame) -> dict[str, object]:
@@ -105,8 +139,6 @@ def _render_country_map(jobs_by_country: pd.DataFrame) -> None:
         .sum()
         .sort_values("job_count", ascending=False)
     )
-    # Marts store ISO 3166-1 alpha-2; Plotly ISO-3 choropleth needs alpha-3.
-    # Convert with pycountry (already a dep); rows that don't resolve are dropped.
     import pycountry
 
     def _alpha3(code: str | None) -> str | None:
@@ -130,7 +162,7 @@ def _render_country_map(jobs_by_country: pd.DataFrame) -> None:
         color_continuous_scale="Blues",
     )
     fig.update_layout(margin={"l": 0, "r": 0, "t": 0, "b": 0})
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def _render_skills(
@@ -167,7 +199,7 @@ def _render_skills(
         labels={"demand_count": "Demand", "skill_name": "Skill"},
     )
     fig.update_layout(margin={"l": 0, "r": 0, "t": 10, "b": 0})
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def _render_salary(salary_df: pd.DataFrame) -> None:
@@ -175,7 +207,6 @@ def _render_salary(salary_df: pd.DataFrame) -> None:
     if salary_df.empty:
         st.caption("No salary data yet.")
         return
-    # Build a long-form frame: for each keyword+currency, two bands: min & max.
     rows: list[dict[str, object]] = []
     for _, r in salary_df.iterrows():
         label = f"{r['search_keyword']} ({r['currency']}/{r['period']})"
@@ -212,7 +243,7 @@ def _render_salary(salary_df: pd.DataFrame) -> None:
         labels={"p75": "p75", "label": "Keyword / currency"},
     )
     fig.update_layout(margin={"l": 0, "r": 0, "t": 10, "b": 0})
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def _render_work_mode(work_mode_df: pd.DataFrame) -> None:
@@ -228,7 +259,7 @@ def _render_work_mode(work_mode_df: pd.DataFrame) -> None:
         barmode="stack",
     )
     fig.update_layout(margin={"l": 0, "r": 0, "t": 10, "b": 0})
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def _render_table(fact_df: pd.DataFrame) -> None:
@@ -240,7 +271,7 @@ def _render_table(fact_df: pd.DataFrame) -> None:
     display = fact_df.copy()
     st.dataframe(
         display,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         height=TABLE_HEIGHT_PX,
         column_config={
@@ -250,6 +281,9 @@ def _render_table(fact_df: pd.DataFrame) -> None:
             "enriched_at": st.column_config.DatetimeColumn("Enriched at"),
             "salary_min": st.column_config.NumberColumn("Salary min"),
             "salary_max": st.column_config.NumberColumn("Salary max"),
+            "tech_skills": st.column_config.ListColumn("Tech skills"),
+            "soft_skills": st.column_config.ListColumn("Soft skills"),
+            "domain_skills": st.column_config.ListColumn("Domain skills"),
         },
     )
 
@@ -257,13 +291,22 @@ def _render_table(fact_df: pd.DataFrame) -> None:
 def main() -> None:
     st.title("Results")
 
+    profiles = _load_profiles_safely()
+    active_profile_id = _render_profile_filter(profiles) if profiles else None
+
     # Load data
     try:
-        fact_df = cached_fact_with_dims(keyword=None, limit=DEFAULT_FACT_LIMIT)
-        jobs_by_country = cached_mart("mart_jobs_by_country")
-        skills_df = cached_mart("mart_skills_by_keyword")
-        salary_df = cached_mart("mart_salary_by_keyword")
-        work_mode_df = cached_mart("mart_work_mode_distribution")
+        fact_df = cached_fact_with_dims(
+            keyword=None, profile_id=active_profile_id, limit=DEFAULT_FACT_LIMIT
+        )
+        jobs_by_country = cached_mart(
+            "mart_jobs_by_country", profile_id=active_profile_id
+        )
+        skills_df = cached_mart("mart_skills_by_keyword", profile_id=active_profile_id)
+        salary_df = cached_mart("mart_salary_by_keyword", profile_id=active_profile_id)
+        work_mode_df = cached_mart(
+            "mart_work_mode_distribution", profile_id=active_profile_id
+        )
     except Exception as exc:
         log.error("results.load.failed", error=str(exc))
         st.error(f"Failed to load data: {exc}")
@@ -305,6 +348,13 @@ def main() -> None:
                 top_n=TOP_SOFT_SKILLS,
                 title=f"Top {TOP_SOFT_SKILLS} soft skills",
             )
+        st.divider()
+        _render_skills(
+            filtered_skills,
+            skill_type=C.SKILL_TYPE_DOMAIN,
+            top_n=TOP_DOMAIN_SKILLS,
+            title=f"Top {TOP_DOMAIN_SKILLS} domain skills per keyword",
+        )
     with tab_salary:
         _render_salary(filtered_salary)
     with tab_mode:
@@ -319,7 +369,9 @@ def main() -> None:
         )
         if limit != DEFAULT_FACT_LIMIT:
             try:
-                fact_df = cached_fact_with_dims(keyword=None, limit=limit)
+                fact_df = cached_fact_with_dims(
+                    keyword=None, profile_id=active_profile_id, limit=limit
+                )
                 filtered_fact = _apply_filters(fact_df, filters)
             except Exception as exc:
                 log.error("results.reload.failed", error=str(exc))

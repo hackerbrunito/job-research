@@ -169,7 +169,7 @@ def render() -> None:
 
     btn_save, btn_reset, btn_test = st.columns(3)
     with btn_save:
-        if st.button("Save override", use_container_width=True):
+        if st.button("Save override", width="stretch"):
             override: dict[str, object] = {
                 "provider": provider,
                 "model": model.strip() or default_model,
@@ -189,14 +189,14 @@ def render() -> None:
             st.success("Override saved for this session.")
 
     with btn_reset:
-        if st.button("Reset to .env defaults", use_container_width=True):
+        if st.button("Reset to .env defaults", width="stretch"):
             st.session_state.pop(SESSION_KEY_OVERRIDE, None)
             log.info("llm.override.cleared")
             st.success("Override cleared. Using `.env` values.")
             st.rerun()
 
     with btn_test:
-        test_clicked = st.button("Test connection", use_container_width=True)
+        test_clicked = st.button("Test connection", width="stretch")
 
     if test_clicked:
         effective = _effective_config(
