@@ -22,6 +22,7 @@ from prefect.cache_policies import NO_CACHE
 
 from job_research import constants as C
 from job_research.config import Settings, get_settings
+from job_research.corrective_loop import CorrectiveResult, run_corrective_pass
 from job_research.database import (
     connect,
     init_schema,
@@ -47,6 +48,7 @@ class PipelineSummary:
     scrape_results: list[ScrapeResult] = field(default_factory=list)
     enrichment: EnrichmentSummary | None = None
     transform: TransformSummary | None = None
+    corrective_results: list[CorrectiveResult] = field(default_factory=list)
     error: str | None = None
 
     @property
@@ -198,6 +200,25 @@ def job_research_pipeline(
     try:
         summary.scrape_results = scrape_task(run_id, requests, profile_id=profile_id)
         summary.enrichment = enrich_task(run_id, enrich_limit, settings=settings)
+
+        # Corrective loop: if acceptance rate is low for any keyword, propose
+        # alternatives, re-scrape, and re-enrich (at most CORRECTIVE_MAX_PASSES).
+        if C.CORRECTIVE_MAX_PASSES > 0:
+            with connect() as _con:
+                corrective_results = run_corrective_pass(
+                    run_id=run_id,
+                    profile_id=profile_id,
+                    sites=site_tuple,
+                    settings=settings,
+                    con=_con,
+                )
+            summary.corrective_results = corrective_results
+            if any(r.triggered for r in corrective_results):
+                # Re-enrich the new rows produced by the corrective scrape.
+                summary.enrichment = enrich_task(
+                    run_id, enrich_limit, settings=settings
+                )
+
         summary.transform = transform_task()
         summary.status = "success"
     except Exception as exc:

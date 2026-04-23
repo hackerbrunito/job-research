@@ -116,3 +116,11 @@ CROSS_ENCODER_THRESHOLD: Final[float] = 0.0
 SETFIT_SCORE_THRESHOLD: Final[float] = 0.5
 # Minimum labelled examples per class required before training is attempted.
 SETFIT_MIN_EXAMPLES_PER_CLASS: Final[int] = 4
+
+# ---- Corrective loop --------------------------------------------------------
+# Minimum acceptance rate below which the corrective loop fires.
+CORRECTIVE_ACCEPTANCE_THRESHOLD: Final[float] = 0.30
+# Max alternative keywords the LLM may propose.
+CORRECTIVE_MAX_ALTERNATIVES: Final[int] = 3
+# Hard limit on corrective passes per pipeline run (prevents runaway cost).
+CORRECTIVE_MAX_PASSES: Final[int] = 1

@@ -33,6 +33,11 @@ htmlcov/
 .coverage
 coverage.xml
 
+# ML model checkpoints and cached weights (can be large)
+checkpoints/
+*.safetensors
+*.onnx
+
 # OS / editor
 .DS_Store
 .vscode/
